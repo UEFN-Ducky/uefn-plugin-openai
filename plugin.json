@@ -1,0 +1,67 @@
+{
+  "id": "openai",
+  "kind": "plugin",
+  "version": "1.0.13",
+  "label": "OpenAI",
+  "description": "OpenAI API key + Codex coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show OpenAI under Providers & Keys and Codex under Coding Agents.",
+  "min_app_version": "1.0.523",
+  "default_enabled": true,
+  "secret_keys": [
+    "openai"
+  ],
+  "contributes": {
+    "llm.providers": [
+      {
+        "id": "openai",
+        "label": "OpenAI",
+        "kind": "secret",
+        "secret_key": "openai",
+        "order": 20
+      }
+    ],
+    "llm.coding_agents": [
+      {
+        "id": "codex",
+        "label": "Codex",
+        "order": 100
+      }
+    ],
+    "settings.sections": [
+      {
+        "tab": "LLMs",
+        "id": "prompt-caching",
+        "title": "OpenAI prompt caching",
+        "description": "Bill-discount prefix caching markers on API calls. Separate from Ducky's freeze prefix (works for all providers).",
+        "order": 81,
+        "properties": [
+          {
+            "id": "promptCaching",
+            "type": "boolean",
+            "default": true,
+            "label": "Enable OpenAI cache markers",
+            "description": "Splits the stable system prefix so OpenAI can reuse cached input tokens across turns."
+          }
+        ]
+      }
+    ],
+    "walkthrough": {
+      "id": "openai",
+      "title": "Set up OpenAI",
+      "auto_start": "first_enable",
+      "settings_tab": "LLMs",
+      "steps": [
+        {
+          "target": "settings.llms.section.llms",
+          "title": "Providers & Keys",
+          "body": "OpenAI lives under Settings \u2192 LLMs. Open Providers & Keys to paste your API key and turn on Codex.",
+          "advance": "require_click",
+          "mode": "rect"
+        }
+      ]
+    }
+  },
+  "backend": {
+    "entry": "backend",
+    "register": "register"
+  }
+}
