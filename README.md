@@ -11,7 +11,11 @@ Install or update from **Settings → Store** in the app — do not install from
 py scripts/build_zip.py
 ```
 
-Writes `deploy/openai-*.ducky-plugin.zip` (scripts/ and deploy/ are not packed).
+Writes `deploy/openai-1.0.12.ducky-plugin.zip` (scripts/ and deploy/ are not packed).
+
+## Secrets
+
+Never commit tokens or keys. The app stores `openai` locally (DPAPI), not in this package.
 
 ## License
 

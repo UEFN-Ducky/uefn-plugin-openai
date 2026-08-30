@@ -1,8 +1,7 @@
 """Codex CLI adapter — `codex exec --json` events + thread resume.
 
-Runs non-interactive turns through the hidden subprocess executor, parses the
-JSONL event stream (thread id, agent-message text, command/tool items), and
-resumes the same Codex thread on later turns (`codex exec resume <id>`).
+This plugin owns ``codex exec resume <id>``. Core only stores the thread
+id this adapter returns and passes it back on the next turn.
 """
 
 from __future__ import annotations
