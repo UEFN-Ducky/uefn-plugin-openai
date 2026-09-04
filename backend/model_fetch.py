@@ -27,7 +27,9 @@ _CACHE_TTL_S = 6 * 3600.0
 
 _OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing"
 _OPENAI_DASHBOARD_CACHE: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {}
+_OPENAI_LIST_CACHE: dict[str, tuple[float, list[ModelInfo]]] = {}
 _PROVIDER_PRICING_CACHE: dict[str, tuple[float, dict[str, _PricingRow]]] = {}
+_LIST_TTL_S = 120.0
 
 
 def _key_hash(api_key: str) -> str:
@@ -45,6 +47,7 @@ def _pricing_catalog() -> dict[str, _PricingRow]:
 
 def clear_model_cache() -> None:
     _OPENAI_DASHBOARD_CACHE.clear()
+    _OPENAI_LIST_CACHE.clear()
     _PROVIDER_PRICING_CACHE.clear()
 
 
@@ -99,13 +102,6 @@ def _feature_list(record: dict[str, Any]) -> list[str]:
         return [str(x) for x in raw]
     if isinstance(raw, dict):
         return [str(k) for k, v in raw.items() if v]
-    return []
-
-
-def _method_list(record: dict[str, Any]) -> list[str]:
-    raw = record.get("supported_methods") or record.get("supportedMethods")
-    if isinstance(raw, list):
-        return [str(x) for x in raw]
     return []
 
 
@@ -297,6 +293,12 @@ def _openai_chat_completions_ok(client, model_id: str) -> bool:
 def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
     from openai import OpenAI
 
+    cache_key = _key_hash(api_key or "")
+    if not verify:
+        hit = _OPENAI_LIST_CACHE.get(cache_key)
+        if hit is not None and (time.time() - hit[0]) < _LIST_TTL_S:
+            return list(hit[1])
+
     client = OpenAI(api_key=api_key)
     listed_ids: list[str] = []
     for m in client.models.list():
@@ -308,36 +310,21 @@ def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
     pricing_catalog = _pricing_catalog()
     models: list[ModelInfo] = []
     seen: set[str] = set()
-
-    if dashboard:
-        for mid in listed_ids:
-            rec = dashboard.get(mid)
-            if not rec:
-                continue
-            methods = _method_list(rec)
-            if methods and "chat.completions" not in methods:
-                continue
-            info = _openai_info_from_dashboard(rec, mid, pricing_catalog)
-            if mid not in seen:
-                models.append(info)
-                seen.add(mid)
-    else:
-        for mid in listed_ids:
-            if mid not in seen:
-                models.append(ModelInfo(id=mid, display_name=mid))
-                seen.add(mid)
+    for mid in listed_ids:
+        if mid in seen:
+            continue
+        rec = dashboard.get(mid)
+        info = (
+            _openai_info_from_dashboard(rec, mid, pricing_catalog)
+            if rec
+            else ModelInfo(id=mid, display_name=mid)
+        )
+        models.append(info)
+        seen.add(mid)
 
     models.sort(key=lambda m: m.id, reverse=True)
     if verify and models:
-        verified: list[ModelInfo] = []
-        for info in models[:40]:
-            if _openai_chat_completions_ok(client, info.id):
-                verified.append(info)
-        if verified:
-            models = verified
-        else:
-            models = models[:15]
-    elif not verify:
-        models = models[:50]
+        models = [info for info in models if _openai_chat_completions_ok(client, info.id)]
+    _cache_put(_OPENAI_LIST_CACHE, cache_key, (time.time(), models))
     return models
 

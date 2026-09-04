@@ -26,6 +26,28 @@ _CODEX_INSTALL_PS = r"irm https://chatgpt.com/codex/install.ps1 | iex"
 _CODEX_INSTALL_NPM = "npm install -g @openai/codex"
 
 
+def _codex_model_rows() -> list[dict[str, str]]:
+    """Live OpenAI /v1/models — empty if the key is missing or the catalog call fails."""
+    try:
+        from backend.agent.secrets import get_key
+
+        key = (get_key("openai") or "").strip()
+    except Exception:
+        return []
+    if not key:
+        return []
+    try:
+        from .model_fetch import fetch_models
+
+        return [
+            {"id": info.id, "name": info.display_name or info.id, "provider": "Codex"}
+            for info in fetch_models(key)
+            if info.id
+        ]
+    except Exception:
+        return []
+
+
 def _codex_missing_status() -> str:
     return (
         "Codex CLI not found — needs the `codex` terminal command (not the ChatGPT desktop app). "
@@ -528,10 +550,7 @@ class CodexAdapter:
             cli_path=path or override,
             default_args=default_args,
             capabilities=self.capabilities,
-            models=[
-                {"id": "gpt-5.1-codex", "name": "gpt-5.1-codex", "provider": "Codex"},
-                {"id": "gpt-5.1-codex-mini", "name": "gpt-5.1-codex-mini", "provider": "Codex"},
-            ],
+            models=_codex_model_rows(),
         )
 
     def _ensure_project_mcp(self, cwd: str, mcp_config_path: str) -> None:
