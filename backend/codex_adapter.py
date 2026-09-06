@@ -110,9 +110,13 @@ def _normalize_codex_extra_args(extra: str) -> list[str]:
 _CODEX_PROFILE = "ducky-uefn"
 _TOML_BEGIN = "# BEGIN UEFN-DUCKY"
 _TOML_END = "# END UEFN-DUCKY"
-# `never` = reject tools that need approval (Ducky MCP). Headless chats need on-failure.
+# `codex exec` hard-sets session approval to Never. MCP tools then die with
+# "approval policy is never" unless the server is pre-approved (`approve`,
+# not `auto`). `-c` on every turn because resume cannot take --approve-for-me.
 _APPROVAL_TOML = "approval_policy = \"on-failure\""
 _APPROVAL_FLAG = ["-c", 'approval_policy="on-failure"']
+_MCP_APPROVE_TOML = 'default_tools_approval_mode = "approve"'
+_MCP_APPROVE_FLAG = ["-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"']
 # `codex exec resume` is a smaller clap parser than `codex exec`.
 _EXEC_ONLY_VALUE = {
     "-p",
@@ -188,8 +192,11 @@ def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
         text = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
     except OSError:
         return False
-    new = text.replace('approval_policy = "never"', _APPROVAL_TOML).replace(
-        "approval_policy = 'never'", _APPROVAL_TOML
+    new = (
+        text.replace('approval_policy = "never"', _APPROVAL_TOML)
+        .replace("approval_policy = 'never'", _APPROVAL_TOML)
+        .replace('default_tools_approval_mode = "auto"', _MCP_APPROVE_TOML)
+        .replace("default_tools_approval_mode = 'auto'", _MCP_APPROVE_TOML)
     )
     if "approval_policy" not in new:
         if _TOML_BEGIN in new:
@@ -197,6 +204,11 @@ def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
         else:
             _merge_marked_toml(cfg, _APPROVAL_TOML + "\n")
             return True
+        changed = True
+    if "[mcp_servers.uefn]" in new and "default_tools_approval_mode" not in new:
+        new = new.replace(
+            "[mcp_servers.uefn]", f"[mcp_servers.uefn]\n{_MCP_APPROVE_TOML}", 1
+        )
         changed = True
     if new != text:
         try:
@@ -210,8 +222,11 @@ def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
             et = extra.read_text(encoding="utf-8")
         except OSError:
             et = ""
-        en = et.replace('approval_policy = "never"', _APPROVAL_TOML).replace(
-            "approval_policy = 'never'", _APPROVAL_TOML
+        en = (
+            et.replace('approval_policy = "never"', _APPROVAL_TOML)
+            .replace("approval_policy = 'never'", _APPROVAL_TOML)
+            .replace('default_tools_approval_mode = "auto"', _MCP_APPROVE_TOML)
+            .replace("default_tools_approval_mode = 'auto'", _MCP_APPROVE_TOML)
         )
         if en != et:
             try:
@@ -260,7 +275,7 @@ def write_codex_uefn_profile(
         "enabled = true",
         "startup_timeout_sec = 60.0",
         "tool_timeout_sec = 180.0",
-        'default_tools_approval_mode = "auto"',
+        _MCP_APPROVE_TOML,
     ]
     if env:
         lines.append("")
@@ -815,7 +830,7 @@ class CodexAdapter:
                 "Open this UTF-8 file and follow every instruction in it exactly "
                 f"(do not summarize first): {prompt_file}"
             )
-        extra_flags: list[str] = list(_APPROVAL_FLAG)
+        extra_flags: list[str] = list(_APPROVAL_FLAG) + list(_MCP_APPROVE_FLAG)
         if not session_id:
             extra_flags.append("--approve-for-me")
         write_codex_uefn_profile(mcp_config_path)

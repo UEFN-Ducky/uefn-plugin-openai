@@ -75,6 +75,8 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert "mcp_servers.uefn" in text
     assert 'approval_policy = "on-failure"' in text
     assert 'approval_policy = "never"' not in text
+    assert 'default_tools_approval_mode = "approve"' in text
+    assert 'default_tools_approval_mode = "auto"' not in text
     assert r"C:\\Ducky\\UEFN-Ducky.exe" in text
     assert "DUCKY_CONV_ID" in text
     cfg = (home / "config.toml").read_text(encoding="utf-8")
@@ -89,10 +91,11 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
         model="gpt-5",
         extra_args="",
         session_id="",
-        extra_flags=["-c", 'approval_policy="on-failure"', "--approve-for-me", "-c", 'sandbox_workspace_write.writable_roots=["C:\\\\tmp"]'],
+        extra_flags=["-c", 'approval_policy="on-failure"', "-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"', "--approve-for-me", "-c", 'sandbox_workspace_write.writable_roots=["C:\\\\tmp"]'],
     )
     assert "-c" in first
     assert 'approval_policy="on-failure"' in first
+    assert 'mcp_servers.uefn.default_tools_approval_mode="approve"' in first
     assert "--approve-for-me" in first
     resume = build_codex_argv(
         binary="codex",
@@ -100,7 +103,7 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
         model="gpt-5",
         extra_args="--full-auto --approve-for-me --add-dir C:\\tmp --oss",
         session_id="th-abc",
-        extra_flags=["-p", name, "--add-dir", r"C:\tmp", "-c", 'approval_policy="on-failure"'],
+        extra_flags=["-p", name, "--add-dir", r"C:\tmp", "-c", 'approval_policy="on-failure"', "-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"'],
     )
     assert "-p" not in resume
     assert "--add-dir" not in resume
@@ -108,6 +111,7 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert "--oss" not in resume
     assert "-s" not in resume
     assert 'approval_policy="on-failure"' in resume
+    assert 'mcp_servers.uefn.default_tools_approval_mode="approve"' in resume
     assert any(t.startswith("sandbox_mode=") or t == 'sandbox_mode="workspace-write"' for t in resume)
     glued = build_codex_argv(
         binary="codex",
@@ -134,13 +138,15 @@ def test_heal_codex_approval_inserts_without_wiping_mcp(tmp_path: Path):
     assert 'approval_policy = "on-failure"' in text
     assert "[mcp_servers.uefn]" in text
     assert 'command = "x"' in text
+    assert 'default_tools_approval_mode = "approve"' in text
 
 
 def test_heal_codex_approval_rewrites_never(tmp_path: Path):
     home = tmp_path / "codex-home"
     home.mkdir()
     (home / "config.toml").write_text(
-        '# BEGIN UEFN-DUCKY\napproval_policy = "never"\n# END UEFN-DUCKY\n',
+        '# BEGIN UEFN-DUCKY\napproval_policy = "never"\n[mcp_servers.uefn]\n'
+        'default_tools_approval_mode = "auto"\n# END UEFN-DUCKY\n',
         encoding="utf-8",
     )
     (home / "ducky-uefn.config.toml").write_text(
@@ -148,8 +154,11 @@ def test_heal_codex_approval_rewrites_never(tmp_path: Path):
         encoding="utf-8",
     )
     assert heal_codex_approval_policy(codex_home=home) is True
-    assert 'approval_policy = "on-failure"' in (home / "config.toml").read_text(encoding="utf-8")
-    assert 'approval_policy = "never"' not in (home / "config.toml").read_text(encoding="utf-8")
+    healed = (home / "config.toml").read_text(encoding="utf-8")
+    assert 'approval_policy = "on-failure"' in healed
+    assert 'approval_policy = "never"' not in healed
+    assert 'default_tools_approval_mode = "approve"' in healed
+    assert 'default_tools_approval_mode = "auto"' not in healed
     assert 'approval_policy = "on-failure"' in (
         home / "ducky-uefn.config.toml"
     ).read_text(encoding="utf-8")
