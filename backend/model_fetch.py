@@ -26,10 +26,26 @@ _CACHE_TTL_S = 6 * 3600.0
 
 
 _OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing"
+_OPENAI_DOCS_MODEL_URL = "https://developers.openai.com/api/docs/models/{id}.md"
 _OPENAI_DASHBOARD_CACHE: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {}
 _OPENAI_LIST_CACHE: dict[str, tuple[float, list[ModelInfo]]] = {}
 _PROVIDER_PRICING_CACHE: dict[str, tuple[float, dict[str, _PricingRow]]] = {}
+_DOCS_SPEC_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _LIST_TTL_S = 120.0
+
+# Dashboard `max_tokens` is max output (Astra: 128k), not the context window (1.05M).
+_CONTEXT_KEYS = (
+    "context_window",
+    "max_context_tokens",
+    "max_input_tokens",
+    "context_length",
+    "n_ctx",
+)
+_DOCS_CTX_RE = re.compile(r"([\d,]+)\s+context window", re.I)
+_DOCS_PRICE_RE = re.compile(
+    r"\|\s*(Input|Cached input|Cache writes|Output)\s*\|\s*\$([\d.]+)",
+    re.I,
+)
 
 
 def _key_hash(api_key: str) -> str:
@@ -49,6 +65,7 @@ def clear_model_cache() -> None:
     _OPENAI_DASHBOARD_CACHE.clear()
     _OPENAI_LIST_CACHE.clear()
     _PROVIDER_PRICING_CACHE.clear()
+    _DOCS_SPEC_CACHE.clear()
 
 
 def fetch_models(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
@@ -194,10 +211,69 @@ def _lookup_openai_price(
     return None
 
 
+def _context_from_record(record: dict[str, Any]) -> int | None:
+    ctx = _int_from_record(record, *_CONTEXT_KEYS)
+    if ctx:
+        return ctx
+    for key in ("limits", "capabilities", "specs", "config"):
+        nested = record.get(key)
+        if isinstance(nested, dict):
+            ctx = _int_from_record(nested, *_CONTEXT_KEYS)
+            if ctx:
+                return ctx
+    return None
+
+
+def parse_openai_docs_md(text: str) -> dict[str, Any]:
+    """Context + prices from an official developers.openai.com model .md page."""
+    out: dict[str, Any] = {}
+    m = _DOCS_CTX_RE.search(text or "")
+    if m:
+        out["context_limit"] = int(m.group(1).replace(",", ""))
+    prices: dict[str, float] = {}
+    for kind, raw in _DOCS_PRICE_RE.findall(text or ""):
+        prices[kind.strip().lower()] = float(raw)
+    if "input" in prices:
+        out["price_in"] = prices["input"]
+    if "output" in prices:
+        out["price_out"] = prices["output"]
+    if "cached input" in prices:
+        out["price_cached_in"] = prices["cached input"]
+    if "cache writes" in prices:
+        out["price_cache_write"] = prices["cache writes"]
+    return out
+
+
+def _docs_spec(model_id: str) -> dict[str, Any]:
+    mid = (model_id or "").strip()
+    if not mid:
+        return {}
+    hit = _DOCS_SPEC_CACHE.get(mid)
+    if hit is not None and (time.time() - hit[0]) < _CACHE_TTL_S:
+        return dict(hit[1])
+    spec: dict[str, Any] = {}
+    try:
+        import httpx
+
+        r = httpx.get(_OPENAI_DOCS_MODEL_URL.format(id=mid), follow_redirects=True, timeout=20.0)
+        if r.status_code == 200 and r.text:
+            spec = parse_openai_docs_md(r.text)
+    except Exception as exc:
+        _log.warning("OpenAI model docs unavailable for %s: %s", mid, exc)
+    _cache_put(_DOCS_SPEC_CACHE, mid, (time.time(), spec))
+    return dict(spec)
+
+
+def _looks_like_chat_model(model_id: str) -> bool:
+    m = (model_id or "").strip().lower()
+    return m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt"))
+
+
 def _openai_info_from_dashboard(
     record: dict[str, Any],
     model_id: str,
     pricing_catalog: dict[str, _PricingRow] | None = None,
+    docs: dict[str, Any] | None = None,
 ) -> ModelInfo:
     features = _feature_list(record)
     alias = str(record.get("alias") or "") or None
@@ -205,13 +281,22 @@ def _openai_info_from_dashboard(
         _openai_prices_from_record(record),
         _lookup_openai_price(pricing_catalog or {}, model_id, alias),
     )
+    docs = docs or {}
+    if price_in is None:
+        price_in = docs.get("price_in")
+    if price_out is None:
+        price_out = docs.get("price_out")
+    if cached is None:
+        cached = docs.get("price_cached_in")
+    if cache_write is None:
+        cache_write = docs.get("price_cache_write")
     return ModelInfo(
         id=model_id,
         display_name=str(alias or record.get("display_name") or model_id),
         supports_vision="image_content" in features,
         supports_tools="function_calling" in features,
         supports_web_search="web_search" in features,
-        context_limit=_int_from_record(record, "max_tokens", "context_window", "max_context_tokens", "context_length"),
+        context_limit=_context_from_record(record) or docs.get("context_limit"),
         price_in=price_in,
         price_out=price_out,
         price_cached_in=cached,
@@ -314,11 +399,23 @@ def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
         if mid in seen:
             continue
         rec = dashboard.get(mid)
-        info = (
-            _openai_info_from_dashboard(rec, mid, pricing_catalog)
-            if rec
-            else ModelInfo(id=mid, display_name=mid)
+        docs = (
+            _docs_spec(mid)
+            if rec is not None and _looks_like_chat_model(mid) and _context_from_record(rec) is None
+            else {}
         )
+        if rec:
+            info = _openai_info_from_dashboard(rec, mid, pricing_catalog, docs)
+        else:
+            info = ModelInfo(
+                id=mid,
+                display_name=mid,
+                context_limit=docs.get("context_limit"),
+                price_in=docs.get("price_in"),
+                price_out=docs.get("price_out"),
+                price_cached_in=docs.get("price_cached_in"),
+                price_cache_write=docs.get("price_cache_write"),
+            )
         models.append(info)
         seen.add(mid)
 

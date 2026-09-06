@@ -62,6 +62,12 @@ def register(api) -> None:
         token_provider="openai",
     )
     try:
+        from .codex_adapter import heal_codex_approval_policy
+
+        heal_codex_approval_policy()
+    except Exception:
+        pass
+    try:
         from .cli_update import schedule_cli_update_on_plugin_load
 
         schedule_cli_update_on_plugin_load()

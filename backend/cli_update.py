@@ -25,6 +25,13 @@ _MISSING_MARKERS = (
     "cannot find the path",
     "not found in path",
 )
+# npm's Windows vendor exe can exist and still refuse to load (openai/codex#24752).
+_BROKEN_BIN_MARKERS = (
+    "spawn efault",
+    "cannot execute the specified program",
+    "the system cannot execute",
+    "bad address",
+)
 _update_lock = threading.Lock()
 _busy = False
 _last: dict[str, Any] = {}
@@ -61,14 +68,77 @@ def is_cli_missing_error(*chunks: str) -> bool:
     return any(m in low for m in _MISSING_MARKERS)
 
 
+def is_cli_broken_binary_error(*chunks: str) -> bool:
+    low = "\n".join(c or "" for c in chunks).lower()
+    return any(m in low for m in _BROKEN_BIN_MARKERS)
+
+
 def should_heal_launch(*chunks: str) -> bool:
-    return is_cli_too_old_error(*chunks) or is_cli_missing_error(*chunks)
+    return (
+        is_cli_too_old_error(*chunks)
+        or is_cli_missing_error(*chunks)
+        or is_cli_broken_binary_error(*chunks)
+    )
 
 
-def resolve_bin(override: str = "") -> str:
+def is_node_codex_wrapper(path: str) -> bool:
+    """npm's `codex` / `codex.cmd` is a Node spawn of a vendor exe that often EFAULTs."""
+    low = (path or "").replace("\\", "/").lower()
+    if not low:
+        return False
+    name = low.rsplit("/", 1)[-1]
+    if name in {"codex.cmd", "codex.ps1", "codex.js"}:
+        return True
+    if "/node_modules/@openai/codex" in low:
+        return True
+    if "/roaming/npm/" in low and name in {"codex", "codex.exe"}:
+        return True
+    return False
+
+
+def _codex_home() -> Path:
+    return Path.home() / ".codex"
+
+
+def native_codex_candidates() -> list[str]:
+    home = _codex_home()
+    found: list[Path] = []
+    releases = home / "packages" / "standalone" / "releases"
+    if releases.is_dir():
+        for release in releases.iterdir():
+            for name in ("codex.exe", "codex"):
+                cand = release / "bin" / name
+                if cand.is_file():
+                    found.append(cand)
+    extra = home / "plugins" / ".plugin-appserver" / ("codex.exe" if os.name == "nt" else "codex")
+    if extra.is_file():
+        found.append(extra)
+    found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in found:
+        key = str(p.resolve()).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(str(p.resolve()))
+    return out
+
+
+def _path_codex(override: str = "") -> str:
     from backend.agent.coding_agents.base import which_cli
 
     return which_cli(_BIN, override)
+
+
+def resolve_bin(override: str = "") -> str:
+    """Prefer a native `codex.exe` that Windows will load over the npm Node shim."""
+    found = _path_codex(override)
+    if found and not is_node_codex_wrapper(found):
+        return found
+    natives = native_codex_candidates()
+    if natives:
+        return natives[0]
+    return "" if is_node_codex_wrapper(found) else (found or "")
 
 
 def stamp_path() -> Path:
@@ -167,6 +237,10 @@ def _install_cli() -> dict[str, Any]:
     first = _ps_install() if os.name == "nt" else {"ok": False}
     if first.get("ok") and resolve_bin():
         return first
+    # npm's win32 vendor exe is what spawn EFAULT'd — don't reinstall it if
+    # the official standalone package already has a loadable binary.
+    if native_codex_candidates():
+        return {"ok": True}
     return _npm_install()
 
 

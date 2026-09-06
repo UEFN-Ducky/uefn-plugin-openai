@@ -10,13 +10,13 @@ import json
 import shlex
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from backend.agent.coding_agents.base import (
     CodingAgentCapabilities,
     CodingAgentInfo,
     CodingAgentLaunchResult,
-    which_cli,
 )
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
 from backend.agent.coding_agents.proc_exec import run_streaming_process
@@ -26,8 +26,8 @@ _CODEX_INSTALL_PS = r"irm https://chatgpt.com/codex/install.ps1 | iex"
 _CODEX_INSTALL_NPM = "npm install -g @openai/codex"
 
 
-def _codex_model_rows() -> list[dict[str, str]]:
-    """Live OpenAI /v1/models — empty if the key is missing or the catalog call fails."""
+def _codex_model_rows() -> list[dict[str, Any]]:
+    """Same OpenAI catalog as the API picker — empty if the key is missing or the call fails."""
     try:
         from backend.agent.secrets import get_key
 
@@ -39,20 +39,34 @@ def _codex_model_rows() -> list[dict[str, str]]:
     try:
         from .model_fetch import fetch_models
 
-        return [
-            {"id": info.id, "name": info.display_name or info.id, "provider": "Codex"}
-            for info in fetch_models(key)
-            if info.id
-        ]
+        rows: list[dict[str, Any]] = []
+        for info in fetch_models(key):
+            if not info.id:
+                continue
+            row: dict[str, Any] = {
+                "id": info.id,
+                "name": info.display_name or info.id,
+                "provider": "Codex",
+                "supports_vision": bool(info.supports_vision),
+                "supports_tools": bool(info.supports_tools),
+                "supports_web_search": bool(info.supports_web_search),
+            }
+            if info.context_limit:
+                row["context_limit"] = int(info.context_limit)
+            if info.price_in is not None:
+                row["price_in"] = info.price_in
+            if info.price_out is not None:
+                row["price_out"] = info.price_out
+            rows.append(row)
+        return rows
     except Exception:
         return []
 
 
 def _codex_missing_status() -> str:
     return (
-        "Codex CLI not found — Ducky will install it automatically "
-        "(not the ChatGPT desktop app). If this stays, send another message or "
-        f"Settings → Store → Update OpenAI. Manual fallback: {_CODEX_INSTALL_PS} or {_CODEX_INSTALL_NPM}"
+        "Codex CLI not found — Ducky is installing it automatically "
+        "(not the ChatGPT desktop app). Send another message in a moment."
     )
 
 
@@ -93,6 +107,176 @@ def _normalize_codex_extra_args(extra: str) -> list[str]:
     return out
 
 
+_CODEX_PROFILE = "ducky-uefn"
+_TOML_BEGIN = "# BEGIN UEFN-DUCKY"
+_TOML_END = "# END UEFN-DUCKY"
+# `never` = reject tools that need approval (Ducky MCP). Headless chats need on-failure.
+_APPROVAL_TOML = "approval_policy = \"on-failure\""
+_APPROVAL_FLAG = ["-c", 'approval_policy="on-failure"']
+# `codex exec resume` is a smaller clap parser than `codex exec`.
+_EXEC_ONLY_VALUE = {
+    "-p",
+    "--profile",
+    "--add-dir",
+    "-s",
+    "--sandbox",
+    "-C",
+    "--cd",
+    "--local-provider",
+    "--color",
+}
+_EXEC_ONLY_BARE = {"--approve-for-me", "--oss"}
+
+
+def _toml_quote(value: str) -> str:
+    return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _strip_exec_only(parts: list[str]) -> list[str]:
+    """Drop flags `codex exec resume` does not accept."""
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        tok = parts[i]
+        if tok in _EXEC_ONLY_BARE:
+            i += 1
+            continue
+        if tok in _EXEC_ONLY_VALUE or tok.startswith("-p=") or tok.startswith("--profile="):
+            i += 2 if tok in _EXEC_ONLY_VALUE and i + 1 < len(parts) and not str(parts[i + 1]).startswith("-") else 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _writable_roots_flag(dirs: list[Path]) -> list[str]:
+    if not dirs:
+        return []
+    roots = ", ".join(_toml_quote(str(p)) for p in dirs)
+    return ["-c", f"sandbox_workspace_write.writable_roots=[{roots}]"]
+
+
+def _merge_marked_toml(path: Path, body: str) -> None:
+    block = f"{_TOML_BEGIN}\n{body.rstrip()}\n{_TOML_END}\n"
+    existing = ""
+    if path.is_file():
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+    start = existing.find(_TOML_BEGIN)
+    end = existing.find(_TOML_END)
+    if start >= 0 and end > start:
+        new = existing[:start] + block + existing[end + len(_TOML_END) :].lstrip("\n")
+    elif start >= 0:
+        new = existing[:start] + block
+    else:
+        new = existing.rstrip() + ("\n\n" if existing.strip() else "") + block
+    path.write_text(new, encoding="utf-8")
+
+
+def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
+    """Rewrite stale `never` so Ducky MCP tools run without a user click."""
+    home = Path(codex_home) if codex_home else Path.home() / ".codex"
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    changed = False
+    cfg = home / "config.toml"
+    try:
+        text = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
+    except OSError:
+        return False
+    new = text.replace('approval_policy = "never"', _APPROVAL_TOML).replace(
+        "approval_policy = 'never'", _APPROVAL_TOML
+    )
+    if "approval_policy" not in new:
+        if _TOML_BEGIN in new:
+            new = new.replace(_TOML_BEGIN, f"{_TOML_BEGIN}\n{_APPROVAL_TOML}", 1)
+        else:
+            _merge_marked_toml(cfg, _APPROVAL_TOML + "\n")
+            return True
+        changed = True
+    if new != text:
+        try:
+            cfg.write_text(new, encoding="utf-8")
+        except OSError:
+            return False
+        changed = True
+    extra = home / f"{_CODEX_PROFILE}.config.toml"
+    if extra.is_file():
+        try:
+            et = extra.read_text(encoding="utf-8")
+        except OSError:
+            et = ""
+        en = et.replace('approval_policy = "never"', _APPROVAL_TOML).replace(
+            "approval_policy = 'never'", _APPROVAL_TOML
+        )
+        if en != et:
+            try:
+                extra.write_text(en, encoding="utf-8")
+                changed = True
+            except OSError:
+                pass
+    return changed
+
+
+def write_codex_uefn_profile(
+    mcp_config_path: str,
+    *,
+    codex_home: Path | None = None,
+) -> str:
+    """Write [mcp_servers.uefn] into config.toml (resume has no -p/--profile)."""
+    if not mcp_config_path:
+        return ""
+    src = Path(mcp_config_path)
+    if not src.is_file():
+        return ""
+    try:
+        data = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    uefn = servers.get("uefn") if isinstance(servers, dict) else None
+    if not isinstance(uefn, dict):
+        return ""
+    command = str(uefn.get("command") or "").strip()
+    if not command:
+        return ""
+    args = [str(a) for a in (uefn.get("args") or [])]
+    env = uefn.get("env") if isinstance(uefn.get("env"), dict) else {}
+    home = Path(codex_home) if codex_home else Path.home() / ".codex"
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return ""
+    lines = [
+        _APPROVAL_TOML,
+        "",
+        "[mcp_servers.uefn]",
+        f"command = {_toml_quote(command)}",
+        f"args = [{', '.join(_toml_quote(a) for a in args)}]",
+        "enabled = true",
+        "startup_timeout_sec = 60.0",
+        "tool_timeout_sec = 180.0",
+        'default_tools_approval_mode = "auto"',
+    ]
+    if env:
+        lines.append("")
+        lines.append("[mcp_servers.uefn.env]")
+        for key in sorted(str(k) for k in env):
+            lines.append(f"{key} = {_toml_quote(str(env[key]))}")
+    body = "\n".join(lines) + "\n"
+    dest = home / f"{_CODEX_PROFILE}.config.toml"
+    try:
+        dest.write_text("# Generated by UEFN-Ducky — rewritten each Codex launch.\n" + body, encoding="utf-8")
+        _merge_marked_toml(home / "config.toml", body)
+    except OSError:
+        return ""
+    return _CODEX_PROFILE
+
+
 def build_codex_argv(
     *,
     binary: str,
@@ -101,6 +285,7 @@ def build_codex_argv(
     extra_args: str,
     session_id: str,
     image_paths: list[str] | None = None,
+    extra_flags: list[str] | None = None,
 ) -> list[str]:
     """Argv for one `codex exec --json` turn; resumes ``session_id`` when set."""
     argv = [binary, "exec"]
@@ -111,8 +296,8 @@ def build_codex_argv(
         # Codex exec natively attaches images to the initial prompt.
         argv.extend(["--image", path])
     extra = _normalize_codex_extra_args(extra_args)
+    flags = list(extra_flags or [])
     if session_id:
-        # `codex exec resume` has no -s/--sandbox flag; use the -c config form.
         rewritten: list[str] = []
         i = 0
         while i < len(extra):
@@ -122,8 +307,10 @@ def build_codex_argv(
                 continue
             rewritten.append(extra[i])
             i += 1
-        extra = rewritten
+        extra = _strip_exec_only(rewritten)
+        flags = _strip_exec_only(flags)
     argv.extend(extra)
+    argv.extend(flags)
     if model and model not in ("", "default"):
         argv.extend(["-m", model])
     else:
@@ -534,11 +721,11 @@ class CodexAdapter:
         cfg = coding_agent_cfg(settings, self.id)
         enabled = bool(cfg.get("enabled", True))
         override = str(cfg.get("cli_path") or "")
-        path = which_cli("codex", override)
+        from .cli_update import read_cli_version, resolve_bin, status_text
+
+        path = resolve_bin(override)
         default_args = str(cfg.get("default_args") or "--full-auto")
         if path:
-            from .cli_update import read_cli_version, status_text
-
             ver = read_cli_version(path)
             extra = status_text()
             status = f"Found: {path}"
@@ -561,35 +748,6 @@ class CodexAdapter:
             capabilities=self.capabilities,
             models=_codex_model_rows(),
         )
-
-    def _ensure_project_mcp(self, cwd: str, mcp_config_path: str) -> None:
-        """Codex often reads project .mcp.json; merge uefn server when possible."""
-        if not cwd or not mcp_config_path:
-            return
-        from pathlib import Path
-
-        try:
-            src = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
-            servers = src.get("mcpServers") if isinstance(src, dict) else None
-            if not isinstance(servers, dict) or "uefn" not in servers:
-                return
-            dest = Path(cwd) / ".mcp.json"
-            existing: dict[str, Any] = {}
-            if dest.is_file():
-                try:
-                    existing = json.loads(dest.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    existing = {}
-            if not isinstance(existing, dict):
-                existing = {}
-            mcp = existing.get("mcpServers")
-            if not isinstance(mcp, dict):
-                mcp = {}
-            mcp["uefn"] = servers["uefn"]
-            existing["mcpServers"] = mcp
-            dest.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        except OSError:
-            pass
 
     def launch(
         self,
@@ -620,7 +778,6 @@ class CodexAdapter:
                 ),
                 status="error",
             )
-        self._ensure_project_mcp(cwd, mcp_config_path)
         from .cli_update import resolve_bin, should_heal_launch, update_cli
 
         binary = resolve_bin(cli_path)
@@ -658,6 +815,17 @@ class CodexAdapter:
                 "Open this UTF-8 file and follow every instruction in it exactly "
                 f"(do not summarize first): {prompt_file}"
             )
+        extra_flags: list[str] = list(_APPROVAL_FLAG)
+        if not session_id:
+            extra_flags.append("--approve-for-me")
+        write_codex_uefn_profile(mcp_config_path)
+        extra_dirs: list[Path] = []
+        if prompt_file is not None:
+            extra_dirs.append(Path(prompt_file).parent)
+        skills = Path.home() / ".claude" / "skills"
+        if skills.is_dir():
+            extra_dirs.append(skills)
+        extra_flags.extend(_writable_roots_flag(extra_dirs))
         try:
             argv = build_codex_argv(
                 binary=binary,
@@ -666,6 +834,7 @@ class CodexAdapter:
                 extra_args=extra_args,
                 session_id=session_id,
                 image_paths=list(image_paths or []),
+                extra_flags=extra_flags,
             )
             state = _CodexStream(conv_id, run_id, push)
             if session_id:
