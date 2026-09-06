@@ -117,6 +117,9 @@ _APPROVAL_TOML = "approval_policy = \"on-failure\""
 _APPROVAL_FLAG = ["-c", 'approval_policy="on-failure"']
 _MCP_APPROVE_TOML = 'default_tools_approval_mode = "approve"'
 _MCP_APPROVE_FLAG = ["-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"']
+# openai/codex#24135: exec ignores default_tools_approval_mode and rejects MCP
+# with "approval policy is never". This flag is on `exec` and `exec resume`.
+_BYPASS_APPROVALS = ["--dangerously-bypass-approvals-and-sandbox"]
 # `codex exec resume` is a smaller clap parser than `codex exec`.
 _EXEC_ONLY_VALUE = {
     "-p",
@@ -830,7 +833,9 @@ class CodexAdapter:
                 "Open this UTF-8 file and follow every instruction in it exactly "
                 f"(do not summarize first): {prompt_file}"
             )
-        extra_flags: list[str] = list(_APPROVAL_FLAG) + list(_MCP_APPROVE_FLAG)
+        extra_flags: list[str] = (
+            list(_APPROVAL_FLAG) + list(_MCP_APPROVE_FLAG) + list(_BYPASS_APPROVALS)
+        )
         if not session_id:
             extra_flags.append("--approve-for-me")
         write_codex_uefn_profile(mcp_config_path)

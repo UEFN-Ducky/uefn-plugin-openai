@@ -91,11 +91,12 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
         model="gpt-5",
         extra_args="",
         session_id="",
-        extra_flags=["-c", 'approval_policy="on-failure"', "-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"', "--approve-for-me", "-c", 'sandbox_workspace_write.writable_roots=["C:\\\\tmp"]'],
+        extra_flags=["-c", 'approval_policy="on-failure"', "-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"', "--dangerously-bypass-approvals-and-sandbox", "--approve-for-me", "-c", 'sandbox_workspace_write.writable_roots=["C:\\\\tmp"]'],
     )
     assert "-c" in first
     assert 'approval_policy="on-failure"' in first
     assert 'mcp_servers.uefn.default_tools_approval_mode="approve"' in first
+    assert "--dangerously-bypass-approvals-and-sandbox" in first
     assert "--approve-for-me" in first
     resume = build_codex_argv(
         binary="codex",
@@ -103,7 +104,7 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
         model="gpt-5",
         extra_args="--full-auto --approve-for-me --add-dir C:\\tmp --oss",
         session_id="th-abc",
-        extra_flags=["-p", name, "--add-dir", r"C:\tmp", "-c", 'approval_policy="on-failure"', "-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"'],
+        extra_flags=["-p", name, "--add-dir", r"C:\tmp", "-c", 'approval_policy="on-failure"', "-c", 'mcp_servers.uefn.default_tools_approval_mode="approve"', "--dangerously-bypass-approvals-and-sandbox"],
     )
     assert "-p" not in resume
     assert "--add-dir" not in resume
@@ -112,6 +113,7 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert "-s" not in resume
     assert 'approval_policy="on-failure"' in resume
     assert 'mcp_servers.uefn.default_tools_approval_mode="approve"' in resume
+    assert "--dangerously-bypass-approvals-and-sandbox" in resume
     assert any(t.startswith("sandbox_mode=") or t == 'sandbox_mode="workspace-write"' for t in resume)
     glued = build_codex_argv(
         binary="codex",
