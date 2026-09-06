@@ -26,7 +26,7 @@ def test_plugin_wires_auto_update():
     adapter = Path(__file__).with_name("codex_adapter.py").read_text(encoding="utf-8")
     assert "schedule_cli_update_on_plugin_load" in init
     assert "update_cli" in adapter
-    assert plugin_package_version() == "1.0.19"
+    assert plugin_package_version() == "1.0.20"
 
 
 if __name__ == "__main__":

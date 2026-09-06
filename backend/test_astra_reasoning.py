@@ -14,35 +14,65 @@ for p in _here.parents:
         sys.path.insert(0, str(cand))
         break
 
+from backend.agent.providers.base import ProviderMessage, ToolCallRequest
 from openai_provider import (
-    apply_chat_reasoning,
-    chat_completions_blocks_tools_with_reasoning,
-    is_tools_plus_reasoning_error,
+    responses_effort,
+    to_responses_input,
+    to_responses_tools,
+    uses_responses_api,
 )
 
 
-def test_astra_forces_none_with_tools():
-    assert chat_completions_blocks_tools_with_reasoning("gpt-6-astra")
-    assert chat_completions_blocks_tools_with_reasoning("GPT-6-mini")
-    assert not chat_completions_blocks_tools_with_reasoning("gpt-4o")
-    kw = apply_chat_reasoning({"model": "gpt-6-astra"}, model="gpt-6-astra", has_tools=True)
-    assert kw["reasoning_effort"] == "none"
-    kw = apply_chat_reasoning({"model": "gpt-4o"}, model="gpt-4o", has_tools=True)
-    assert "reasoning_effort" not in kw
-    kw = apply_chat_reasoning({"model": "gpt-6-astra"}, model="gpt-6-astra", has_tools=False)
-    assert "reasoning_effort" not in kw
+def test_uses_responses_and_effort():
+    assert uses_responses_api("gpt-6-astra")
+    assert uses_responses_api("GPT-6-mini")
+    assert not uses_responses_api("gpt-4o")
+    assert responses_effort("off") == "low"
+    assert responses_effort("high") == "high"
 
 
-def test_conflict_error_detect():
-    err = Exception(
-        "Function tools with reasoning_effort are not supported for gpt-6-astra "
-        "in /v1/chat/completions."
+def test_tools_and_input_roundtrip():
+    tools = to_responses_tools(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ping",
+                    "description": "Ping",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
     )
-    assert is_tools_plus_reasoning_error(err)
-    assert not is_tools_plus_reasoning_error(Exception("rate limit exceeded"))
+    assert tools == [
+        {
+            "type": "function",
+            "name": "ping",
+            "description": "Ping",
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ]
+    msgs = [
+        ProviderMessage(role="user", content="first"),
+        ProviderMessage(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCallRequest(id="t1", name="ping", arguments={"x": 1})],
+            thinking_blocks=[{"type": "reasoning", "id": "rs_1"}],
+        ),
+        ProviderMessage(role="tool", tool_call_id="t1", content='{"ok":true}'),
+        ProviderMessage(role="assistant", content="done"),
+    ]
+    out = to_responses_input(msgs)
+    assert out[0] == {"role": "user", "content": "first"}
+    assert out[1] == {"type": "reasoning", "id": "rs_1"}
+    assert out[2]["type"] == "function_call"
+    assert out[2]["call_id"] == "t1"
+    assert out[3] == {"type": "function_call_output", "call_id": "t1", "output": '{"ok":true}'}
+    assert out[4] == {"role": "assistant", "content": "done"}
 
 
 if __name__ == "__main__":
-    test_astra_forces_none_with_tools()
-    test_conflict_error_detect()
+    test_uses_responses_and_effort()
+    test_tools_and_input_roundtrip()
     print("ok")

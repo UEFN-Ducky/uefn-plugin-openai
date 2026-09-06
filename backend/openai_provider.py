@@ -1,4 +1,4 @@
-"""OpenAI Chat Completions provider."""
+"""OpenAI Chat Completions + Responses (Astra / gpt-6) provider."""
 
 from __future__ import annotations
 
@@ -15,36 +15,143 @@ from backend.agent.providers.base import (
 )
 from backend.agent.providers.cache_utils import openai_system_messages, parse_openai_usage
 from backend.agent.providers.thinking import ThinkSplitter, reasoning_from_delta
+from backend.agent.thinking_effort import normalize_thinking_effort
 
 
-def chat_completions_blocks_tools_with_reasoning(model: str) -> bool:
-    """gpt-6 / Astra default a reasoning_effort that /v1/chat/completions rejects with tools."""
+def uses_responses_api(model: str) -> bool:
     mid = (model or "").strip().lower()
     return "astra" in mid or mid.startswith("gpt-6")
 
 
-def is_tools_plus_reasoning_error(exc: BaseException) -> bool:
-    msg = str(exc).lower()
-    return "function tools" in msg and "reasoning_effort" in msg
+def responses_effort(thinking_effort: str) -> str:
+    """Astra rejects `none`; Off in the UI maps to the lowest supported effort."""
+    v = normalize_thinking_effort(thinking_effort)
+    if v in ("low", "medium", "high"):
+        return v
+    return "low"
 
 
-def apply_chat_reasoning(
-    create_kwargs: dict[str, Any],
-    *,
-    model: str,
-    has_tools: bool,
-) -> dict[str, Any]:
-    out = dict(create_kwargs)
-    if has_tools and chat_completions_blocks_tools_with_reasoning(model):
-        # ponytail: chat completions cannot pair tools + effort; Responses API is the upgrade
-        out["reasoning_effort"] = "none"
+def to_responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for t in tools or []:
+        fn = t.get("function") if isinstance(t, dict) else None
+        if isinstance(fn, dict):
+            out.append(
+                {
+                    "type": "function",
+                    "name": fn.get("name") or "",
+                    "description": fn.get("description") or "",
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+            continue
+        if isinstance(t, dict):
+            out.append(t)
     return out
 
 
+def _as_dict(obj: Any) -> dict[str, Any] | None:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        try:
+            data = dump(exclude_none=True)
+        except TypeError:
+            data = dump()
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _responses_user_content(content: Any) -> Any:
+    if not isinstance(content, list):
+        return content
+    parts: list[dict[str, Any]] = []
+    for p in content:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "image_url":
+            url = ((p.get("image_url") or {}) if isinstance(p.get("image_url"), dict) else {}).get("url") or ""
+            parts.append({"type": "input_image", "image_url": url})
+        elif p.get("type") == "text":
+            parts.append({"type": "input_text", "text": p.get("text") or ""})
+        else:
+            parts.append(p)
+    return parts
+
+
+def to_responses_input(messages: list[ProviderMessage]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if m.role == "tool":
+            out.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": m.tool_call_id,
+                    "output": m.content or "",
+                }
+            )
+            continue
+        for block in m.thinking_blocks or []:
+            if isinstance(block, dict) and block.get("type") == "reasoning":
+                out.append(block)
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                out.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tc.id,
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments or {}),
+                    }
+                )
+            continue
+        if m.role == "user" and m.attachments:
+            out.append(
+                {
+                    "role": "user",
+                    "content": _responses_user_content(build_openai_user_content(m.content, m.attachments)),
+                }
+            )
+            continue
+        if m.content:
+            out.append({"role": m.role, "content": m.content})
+    return out
+
+
+def _event_delta(event: Any) -> str:
+    d = getattr(event, "delta", None)
+    if isinstance(d, str) and d:
+        return d
+    if d is None:
+        return ""
+    text = getattr(d, "text", None)
+    return text if isinstance(text, str) else ""
+
+
+def _responses_usage(usage: Any) -> dict[str, int]:
+    parsed = parse_openai_usage(usage)
+    if parsed.get("input_tokens") or parsed.get("output_tokens"):
+        return parsed
+    if usage is None:
+        return {}
+    return {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "cache_read_tokens": int(
+            getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
+        ),
+        "cache_write_tokens": 0,
+    }
+
+
 class OpenAIProvider:
-    def __init__(self, api_key: str, model: str, **_kw: Any) -> None:
+    def __init__(self, api_key: str, model: str, *, thinking_effort: str = "off", **_kw: Any) -> None:
         self._api_key = api_key
         self._model = model
+        self._thinking_effort = normalize_thinking_effort(thinking_effort)
 
     def _client(self):
         from openai import OpenAI
@@ -94,7 +201,149 @@ class OpenAIProvider:
             out.append({"role": m.role, "content": m.content})
         return out
 
+    def _instructions(self, system: str, cache: PromptCachePayload | None) -> str:
+        return "\n\n".join(
+            str(m.get("content") or "")
+            for m in openai_system_messages(cache, fallback_system=system)
+            if m.get("content")
+        )
+
     async def stream_turn(
+        self,
+        *,
+        system: str,
+        messages: list[ProviderMessage],
+        tools: list[dict[str, Any]],
+        cancel_event: Any | None = None,
+        cache: PromptCachePayload | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        if uses_responses_api(self._model):
+            async for event in self._stream_responses(
+                system=system,
+                messages=messages,
+                tools=tools,
+                cancel_event=cancel_event,
+                cache=cache,
+            ):
+                yield event
+            return
+        async for event in self._stream_chat(
+            system=system,
+            messages=messages,
+            tools=tools,
+            cancel_event=cancel_event,
+            cache=cache,
+        ):
+            yield event
+
+    async def _stream_responses(
+        self,
+        *,
+        system: str,
+        messages: list[ProviderMessage],
+        tools: list[dict[str, Any]],
+        cancel_event: Any | None = None,
+        cache: PromptCachePayload | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        client = self._client()
+        collected_text = ""
+        tool_calls_acc: dict[int, dict[str, Any]] = {}
+        thinking_blocks: list[dict[str, Any]] = []
+        usage: dict[str, int] = {}
+        cancelled = False
+        create_kwargs: dict[str, Any] = {
+            "model": self._model,
+            "input": to_responses_input(messages),
+            "instructions": self._instructions(system, cache),
+            "tools": to_responses_tools(tools) or None,
+            "stream": True,
+            "store": False,
+            "reasoning": {"effort": responses_effort(self._thinking_effort), "summary": "auto"},
+        }
+        cache_key = (cache.prompt_cache_key if cache else "") or ""
+        if cache_key:
+            create_kwargs["prompt_cache_key"] = cache_key
+
+        stream = client.responses.create(**create_kwargs)
+        for event in stream:
+            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                cancelled = True
+                break
+            etype = getattr(event, "type", "") or ""
+            if etype == "response.output_text.delta":
+                chunk = _event_delta(event)
+                if chunk:
+                    collected_text += chunk
+                    yield StreamEvent(kind=StreamEventKind.TEXT_DELTA, text=chunk)
+                continue
+            if etype in (
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+            ):
+                chunk = _event_delta(event)
+                if chunk:
+                    yield StreamEvent(kind=StreamEventKind.THINKING, text=chunk)
+                continue
+            if etype == "response.output_item.added":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", "") == "function_call":
+                    idx = int(getattr(event, "output_index", 0) or 0)
+                    tool_calls_acc[idx] = {
+                        "id": getattr(item, "call_id", None) or getattr(item, "id", "") or "",
+                        "name": getattr(item, "name", "") or "",
+                        "arguments": getattr(item, "arguments", "") or "",
+                    }
+                continue
+            if etype == "response.function_call_arguments.delta":
+                idx = int(getattr(event, "output_index", 0) or 0)
+                acc = tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                acc["arguments"] += _event_delta(event)
+                continue
+            if etype == "response.output_item.done":
+                item = getattr(event, "item", None)
+                dumped = _as_dict(item)
+                if dumped and dumped.get("type") == "reasoning":
+                    thinking_blocks.append(dumped)
+                elif getattr(item, "type", "") == "function_call":
+                    idx = int(getattr(event, "output_index", 0) or 0)
+                    acc = tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    acc["id"] = getattr(item, "call_id", None) or acc["id"] or getattr(item, "id", "") or ""
+                    acc["name"] = getattr(item, "name", None) or acc["name"]
+                    if getattr(item, "arguments", None):
+                        acc["arguments"] = item.arguments
+                continue
+            if etype == "response.completed":
+                resp = getattr(event, "response", None)
+                usage = _responses_usage(getattr(resp, "usage", None) if resp is not None else None)
+
+        if cancelled:
+            return
+
+        rebuilt: list[ToolCallRequest] = []
+        for acc in tool_calls_acc.values():
+            try:
+                args = json.loads(acc["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            rebuilt.append(
+                ToolCallRequest(id=acc["id"] or "call", name=acc["name"], arguments=args)
+            )
+        if rebuilt:
+            yield StreamEvent(
+                kind=StreamEventKind.TOOL_CALLS,
+                tool_calls=rebuilt,
+                usage=usage,
+                thinking_blocks=thinking_blocks,
+            )
+        yield StreamEvent(
+            kind=StreamEventKind.DONE,
+            text=collected_text,
+            stop_reason="tool_calls" if rebuilt else "stop",
+            usage=usage,
+            thinking_blocks=thinking_blocks,
+        )
+
+    async def _stream_chat(
         self,
         *,
         system: str,
@@ -120,18 +369,8 @@ class OpenAIProvider:
         cache_key = (cache.prompt_cache_key if cache else "") or ""
         if cache_key:
             create_kwargs["prompt_cache_key"] = cache_key
-        create_kwargs = apply_chat_reasoning(
-            create_kwargs, model=self._model, has_tools=bool(tools)
-        )
 
-        try:
-            stream = client.chat.completions.create(**create_kwargs)
-        except Exception as exc:
-            if bool(tools) and is_tools_plus_reasoning_error(exc):
-                create_kwargs["reasoning_effort"] = "none"
-                stream = client.chat.completions.create(**create_kwargs)
-            else:
-                raise
+        stream = client.chat.completions.create(**create_kwargs)
         for chunk in stream:
             if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
                 cancelled = True
@@ -196,6 +435,14 @@ class OpenAIProvider:
     async def test_connection(self) -> tuple[bool, str]:
         try:
             client = self._client()
+            if uses_responses_api(self._model):
+                r = client.responses.create(
+                    model=self._model,
+                    input="ping",
+                    reasoning={"effort": "low"},
+                )
+                _ = getattr(r, "output_text", None) or True
+                return True, "OpenAI OK"
             r = client.chat.completions.create(
                 model=self._model,
                 max_tokens=8,
@@ -204,11 +451,4 @@ class OpenAIProvider:
             _ = r.choices[0].message.content
             return True, "OpenAI OK"
         except Exception as e:
-            err = str(e)
-            if "v1/responses" in err or "only supported in v1/responses" in err:
-                return (
-                    False,
-                    "Model requires OpenAI Responses API (not supported in chat yet). "
-                    "Pick a chat-completions model such as gpt-4o or gpt-4o-mini.",
-                )
-            return False, err
+            return False, str(e)
