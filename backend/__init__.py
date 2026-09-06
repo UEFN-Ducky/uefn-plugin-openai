@@ -6,10 +6,9 @@ from pathlib import Path
 from typing import Any
 
 _INSTALL_HELP = (
-    "Needs the OpenAI Codex CLI (`codex` in PowerShell) — not the ChatGPT desktop app. "
-    "Install in Windows PowerShell: irm https://chatgpt.com/codex/install.ps1 | iex "
-    "(or npm install -g @openai/codex). Ducky runs `codex exec` (non-interactive) so replies return to chat. "
-    "Ensure %APPDATA%\\npm is on PATH, run codex --version, restart Ducky, and click Detect."
+    "Ducky installs and updates the Codex CLI when this plugin is installed or "
+    "updated — you should not run the Codex installer yourself. Needs the `codex` "
+    "CLI (not the ChatGPT desktop app)."
 )
 
 
@@ -62,4 +61,10 @@ def register(api) -> None:
         install_help=_INSTALL_HELP,
         token_provider="openai",
     )
+    try:
+        from .cli_update import schedule_cli_update_on_plugin_load
+
+        schedule_cli_update_on_plugin_load()
+    except Exception:
+        pass
     api.log("OpenAI gateway contribution active (Providers + Codex)")

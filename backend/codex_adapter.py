@@ -50,8 +50,9 @@ def _codex_model_rows() -> list[dict[str, str]]:
 
 def _codex_missing_status() -> str:
     return (
-        "Codex CLI not found — needs the `codex` terminal command (not the ChatGPT desktop app). "
-        f"Install in Windows PowerShell: {_CODEX_INSTALL_PS} or {_CODEX_INSTALL_NPM}"
+        "Codex CLI not found — Ducky will install it automatically "
+        "(not the ChatGPT desktop app). If this stays, send another message or "
+        f"Settings → Store → Update OpenAI. Manual fallback: {_CODEX_INSTALL_PS} or {_CODEX_INSTALL_NPM}"
     )
 
 
@@ -536,7 +537,15 @@ class CodexAdapter:
         path = which_cli("codex", override)
         default_args = str(cfg.get("default_args") or "--full-auto")
         if path:
+            from .cli_update import read_cli_version, status_text
+
+            ver = read_cli_version(path)
+            extra = status_text()
             status = f"Found: {path}"
+            if ver:
+                status += f" · v{ver}"
+            if extra and extra not in status:
+                status += f" · {extra}"
             available = enabled
         else:
             status = _codex_missing_status()
@@ -612,7 +621,26 @@ class CodexAdapter:
                 status="error",
             )
         self._ensure_project_mcp(cwd, mcp_config_path)
-        binary = which_cli("codex", cli_path) or "codex"
+        from .cli_update import resolve_bin, should_heal_launch, update_cli
+
+        binary = resolve_bin(cli_path)
+        if not binary:
+            push(
+                {
+                    "type": "status",
+                    "text": "Codex CLI missing — installing automatically…",
+                    "conv_id": conv_id,
+                    "run_id": run_id,
+                }
+            )
+            upd = update_cli(cli_path)
+            binary = resolve_bin(cli_path) or str(upd.get("cli_path") or "")
+            if not binary:
+                return CodingAgentLaunchResult(
+                    ok=False,
+                    error=str(upd.get("error") or "Codex CLI not found and auto-install failed"),
+                    status="error",
+                )
         full_prompt = prompt
         # System context only on the first turn; the resumed thread keeps it.
         if system_prompt.strip() and not session_id:
@@ -664,6 +692,60 @@ class CodexAdapter:
             reply = state.trailing_text() or ("" if blocks else streamed_all)
             new_session = state.session_id or session_id
 
+            result = finalize_cli_turn(
+                proc=proc,
+                reply=reply,
+                streamed=bool(streamed_all) or bool(blocks),
+                blocks=blocks,
+                session_id=session_id,
+                new_session=new_session,
+                usage=state.usage,
+                agent_label="Codex",
+                timeout_s=timeout_s,
+                error_text=state.error_text,
+                stale_session_markers=("resume", "not found"),
+            )
+            if result.ok or not should_heal_launch(
+                result.error or "",
+                result.reply_text or "",
+                proc.stderr_tail,
+                proc.raw_tail,
+                state.error_text,
+            ):
+                return result
+            push(
+                {
+                    "type": "status",
+                    "text": "Codex CLI is stale or missing — updating automatically…",
+                    "conv_id": conv_id,
+                    "run_id": run_id,
+                }
+            )
+            upd = update_cli(binary)
+            if not upd.get("ok"):
+                result.error = (
+                    (result.error or "")
+                    + "\n\nDucky tried to update Codex automatically and failed: "
+                    + str(upd.get("error") or "unknown")
+                )
+                return result
+            binary = resolve_bin(cli_path) or str(upd.get("cli_path") or binary)
+            argv[0] = binary
+            state = _CodexStream(conv_id, run_id, push)
+            proc = run_streaming_process(
+                argv=argv,
+                cwd=cwd,
+                env_extra=env,
+                conv_id=conv_id,
+                on_line=state.on_line,
+                timeout_s=timeout_s,
+                cancel=cancel,
+            )
+            state.finish_unresolved_tools(cancelled=proc.cancelled)
+            blocks = state.finalize_blocks()
+            streamed_all = "".join(state.text_parts).strip()
+            reply = state.trailing_text() or ("" if blocks else streamed_all)
+            new_session = state.session_id or session_id
             return finalize_cli_turn(
                 proc=proc,
                 reply=reply,
