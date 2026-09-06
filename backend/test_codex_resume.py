@@ -17,8 +17,10 @@ for p in _here.parents:
 
 from codex_adapter import (
     CodexAdapter,
+    _codex_model_rows,
     build_codex_argv,
     heal_codex_approval_policy,
+    normalize_codex_model,
     write_codex_uefn_profile,
 )
 
@@ -48,6 +50,35 @@ def test_first_turn_has_no_resume():
 
 def test_adapter_opts_into_resume():
     assert CodexAdapter.capabilities.resume is True
+
+
+def test_codex_models_without_api_key():
+    import backend.agent.secrets as secrets
+
+    orig = secrets.get_key
+    secrets.get_key = lambda *_a, **_k: ""
+    try:
+        rows = _codex_model_rows()
+        ids = {r["id"] for r in rows}
+        assert "auto" in ids
+        assert "gpt-5" in ids
+        assert all(r.get("supports_tools") for r in rows)
+    finally:
+        secrets.get_key = orig
+
+
+def test_auto_model_omits_dash_m():
+    argv = build_codex_argv(
+        binary="codex",
+        prompt="hello",
+        model="auto",
+        extra_args="",
+        session_id="",
+    )
+    assert "-m" not in argv
+    assert normalize_codex_model("default") == "auto"
+    assert normalize_codex_model("") == "auto"
+    assert normalize_codex_model("gpt-5") == "gpt-5"
 
 
 def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
@@ -172,6 +203,8 @@ if __name__ == "__main__":
     test_followup_resumes_thread()
     test_first_turn_has_no_resume()
     test_adapter_opts_into_resume()
+    test_codex_models_without_api_key()
+    test_auto_model_omits_dash_m()
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         write_home = root / "write"

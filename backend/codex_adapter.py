@@ -25,42 +25,84 @@ from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
 _CODEX_INSTALL_PS = r"irm https://chatgpt.com/codex/install.ps1 | iex"
 _CODEX_INSTALL_NPM = "npm install -g @openai/codex"
 
+# ChatGPT login (no API key) still runs these via `codex exec`. Live /v1/models
+# is merged on top when a key exists.
+_CODEX_FALLBACK_MODELS: tuple[tuple[str, str], ...] = (
+    ("auto", "Auto"),
+    ("gpt-5.1-codex", "GPT-5.1 Codex"),
+    ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
+    ("gpt-5-codex", "GPT-5 Codex"),
+    ("gpt-5", "GPT-5"),
+    ("gpt-5-mini", "GPT-5 Mini"),
+    ("o3", "o3"),
+    ("o4-mini", "o4-mini"),
+)
+
+
+def _is_codex_auto_model(model: str) -> bool:
+    return (model or "").strip().lower() in ("", "auto", "default")
+
+
+def normalize_codex_model(model: str) -> str:
+    mid = (model or "").strip()
+    return "auto" if _is_codex_auto_model(mid) else mid
+
+
+def _codex_row(model_id: str, name: str, **extra: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": model_id,
+        "name": name or model_id,
+        "provider": "Codex",
+        "supports_tools": True,
+    }
+    row.update(extra)
+    return row
+
+
+def _codex_fallback_rows() -> list[dict[str, Any]]:
+    return [_codex_row(mid, name) for mid, name in _CODEX_FALLBACK_MODELS]
+
 
 def _codex_model_rows() -> list[dict[str, Any]]:
-    """Same OpenAI catalog as the API picker — empty if the key is missing or the call fails."""
+    """Picker rows. ChatGPT-login users get the fallback list; an API key adds live ids."""
+    fallback = _codex_fallback_rows()
     try:
         from backend.agent.secrets import get_key
 
         key = (get_key("openai") or "").strip()
     except Exception:
-        return []
+        return fallback
     if not key:
-        return []
+        return fallback
     try:
         from .model_fetch import fetch_models
 
         rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for info in fetch_models(key):
-            if not info.id:
+            mid = (info.id or "").strip()
+            if not mid or mid in seen:
                 continue
-            row: dict[str, Any] = {
-                "id": info.id,
-                "name": info.display_name or info.id,
-                "provider": "Codex",
+            seen.add(mid)
+            extra: dict[str, Any] = {
                 "supports_vision": bool(info.supports_vision),
-                "supports_tools": bool(info.supports_tools),
+                "supports_tools": True,
                 "supports_web_search": bool(info.supports_web_search),
             }
             if info.context_limit:
-                row["context_limit"] = int(info.context_limit)
+                extra["context_limit"] = int(info.context_limit)
             if info.price_in is not None:
-                row["price_in"] = info.price_in
+                extra["price_in"] = info.price_in
             if info.price_out is not None:
-                row["price_out"] = info.price_out
-            rows.append(row)
+                extra["price_out"] = info.price_out
+            rows.append(_codex_row(mid, info.display_name or mid, **extra))
+        if not rows:
+            return fallback
+        if "auto" not in seen:
+            rows.insert(0, _codex_row("auto", "Auto"))
         return rows
     except Exception:
-        return []
+        return fallback
 
 
 def _codex_missing_status() -> str:
@@ -329,10 +371,8 @@ def build_codex_argv(
         flags = _strip_exec_only(flags)
     argv.extend(extra)
     argv.extend(flags)
-    if model and model not in ("", "default"):
+    if not _is_codex_auto_model(model):
         argv.extend(["-m", model])
-    else:
-        raise ValueError("Codex requires an exact model id")
     argv.append(prompt)
     return argv
 
@@ -786,16 +826,7 @@ class CodexAdapter:
         timeout_s: float = 0.0,
         image_paths: list[str] | None = None,
     ) -> CodingAgentLaunchResult:
-        model_id = (model or "").strip()
-        if not model_id or model_id.lower() == "default":
-            return CodingAgentLaunchResult(
-                ok=False,
-                error=(
-                    "No exact Codex model selected. Pick a concrete model "
-                    "for this chat or Ducky profile."
-                ),
-                status="error",
-            )
+        model_id = normalize_codex_model(model)
         from .cli_update import resolve_bin, should_heal_launch, update_cli
 
         binary = resolve_bin(cli_path)
@@ -850,7 +881,7 @@ class CodexAdapter:
             argv = build_codex_argv(
                 binary=binary,
                 prompt=launch_prompt,
-                model=model,
+                model=model_id,
                 extra_args=extra_args,
                 session_id=session_id,
                 image_paths=list(image_paths or []),

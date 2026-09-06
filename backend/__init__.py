@@ -32,6 +32,33 @@ def _skills_dir() -> str:
     return str(Path.home() / ".claude" / "skills")
 
 
+def _normalize_codex_model(model: str) -> str:
+    from .codex_adapter import normalize_codex_model
+
+    return normalize_codex_model(model)
+
+
+def _heal_default_model_if_codex_only() -> None:
+    """ChatGPT-login installs have no API catalog — pin Default Model to Codex Auto."""
+    try:
+        from backend.agent.secrets import has_key
+        from frontend.settings import PanelSettings
+
+        settings = PanelSettings.load()
+        if (getattr(settings, "default_model", "") or "").strip():
+            return
+        if has_key("openai"):
+            return
+        from .cli_update import resolve_bin
+
+        if not resolve_bin(""):
+            return
+        settings.default_model = "codex:auto"
+        settings.save()
+    except Exception:
+        pass
+
+
 def register(api) -> None:
     from .codex_adapter import CodexAdapter
     from .openai_provider import OpenAIProvider
@@ -60,6 +87,7 @@ def register(api) -> None:
         },
         install_help=_INSTALL_HELP,
         token_provider="openai",
+        normalize_model=_normalize_codex_model,
     )
     try:
         from .codex_adapter import heal_codex_approval_policy
@@ -71,6 +99,10 @@ def register(api) -> None:
         from .cli_update import schedule_cli_update_on_plugin_load
 
         schedule_cli_update_on_plugin_load()
+    except Exception:
+        pass
+    try:
+        _heal_default_model_if_codex_only()
     except Exception:
         pass
     api.log("OpenAI gateway contribution active (Providers + Codex)")
