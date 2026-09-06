@@ -17,8 +17,32 @@ from backend.agent.providers.cache_utils import openai_system_messages, parse_op
 from backend.agent.providers.thinking import ThinkSplitter, reasoning_from_delta
 
 
+def chat_completions_blocks_tools_with_reasoning(model: str) -> bool:
+    """gpt-6 / Astra default a reasoning_effort that /v1/chat/completions rejects with tools."""
+    mid = (model or "").strip().lower()
+    return "astra" in mid or mid.startswith("gpt-6")
+
+
+def is_tools_plus_reasoning_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "function tools" in msg and "reasoning_effort" in msg
+
+
+def apply_chat_reasoning(
+    create_kwargs: dict[str, Any],
+    *,
+    model: str,
+    has_tools: bool,
+) -> dict[str, Any]:
+    out = dict(create_kwargs)
+    if has_tools and chat_completions_blocks_tools_with_reasoning(model):
+        # ponytail: chat completions cannot pair tools + effort; Responses API is the upgrade
+        out["reasoning_effort"] = "none"
+    return out
+
+
 class OpenAIProvider:
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(self, api_key: str, model: str, **_kw: Any) -> None:
         self._api_key = api_key
         self._model = model
 
@@ -96,8 +120,18 @@ class OpenAIProvider:
         cache_key = (cache.prompt_cache_key if cache else "") or ""
         if cache_key:
             create_kwargs["prompt_cache_key"] = cache_key
+        create_kwargs = apply_chat_reasoning(
+            create_kwargs, model=self._model, has_tools=bool(tools)
+        )
 
-        stream = client.chat.completions.create(**create_kwargs)
+        try:
+            stream = client.chat.completions.create(**create_kwargs)
+        except Exception as exc:
+            if bool(tools) and is_tools_plus_reasoning_error(exc):
+                create_kwargs["reasoning_effort"] = "none"
+                stream = client.chat.completions.create(**create_kwargs)
+            else:
+                raise
         for chunk in stream:
             if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
                 cancelled = True
