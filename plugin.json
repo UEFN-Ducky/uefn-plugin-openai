@@ -1,7 +1,7 @@
 {
   "id": "openai",
   "kind": "plugin",
-  "version": "1.0.29",
+  "version": "1.0.33",
   "label": "OpenAI",
   "description": "OpenAI API key + Codex coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show OpenAI under Providers & Keys and Codex under Coding Agents.",
   "min_app_version": "1.0.523",
@@ -51,10 +51,31 @@
       "settings_tab": "LLMs",
       "steps": [
         {
-          "target": "settings.llms.section.llms",
-          "title": "Providers & Keys",
-          "body": "OpenAI lives under Settings → LLMs. Open Providers & Keys to paste your API key and turn on Codex.",
+          "target": "settings.llms.provider.openai",
+          "title": "Open OpenAI",
+          "body": "Press the OpenAI row in this table. The page slides open so you can paste a key or use Codex.",
           "advance": "require_click",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.key",
+          "title": "API key or Codex",
+          "body": "Paste an OpenAI API key here to use GPT in Ducky chats. No key? Skip this and use Codex on this same slide — ChatGPT login is enough.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.save",
+          "title": "Test & Save",
+          "body": "Press Test & Save after you paste a key. Using Codex without a key? Press Skip.",
+          "advance": "require_click",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.agent",
+          "title": "Codex",
+          "body": "Codex is OpenAI's coding agent. Detect finds the CLI. Keep it on to pick Codex in chat.",
+          "advance": "next",
           "mode": "rect"
         }
       ]

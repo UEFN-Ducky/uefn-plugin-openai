@@ -113,31 +113,33 @@ def _codex_missing_status() -> str:
 
 
 def _normalize_codex_extra_args(extra: str) -> list[str]:
-    """Map legacy flags (e.g. --full-auto) onto current `codex exec` options."""
+    """Map legacy flags (e.g. --full-auto) onto current `codex exec` options.
+
+    Never emit ``--sandbox`` / ``-s`` — Codex 0.153+ rejects that next to
+    ``--approve-for-me`` (Test, first chat turn, and any saved default args).
+    """
     raw = (extra or "").strip()
-    if not raw:
-        return ["-s", "workspace-write"]
-    parts = shlex.split(raw, posix=False)
+    parts = shlex.split(raw, posix=False) if raw else []
     out: list[str] = []
     i = 0
     saw_sandbox = False
     while i < len(parts):
         tok = parts[i]
+        if tok == "--approve-for-me":
+            i += 1
+            continue
         if tok in ("--full-auto", "-a", "--ask-for-approval"):
-            # Old interactive flag — for exec, prefer workspace-write sandbox.
             if not saw_sandbox:
-                out.extend(["-s", "workspace-write"])
+                out.extend(["-c", 'sandbox_mode="workspace-write"'])
                 saw_sandbox = True
             i += 1
-            # Skip optional value after -a / --ask-for-approval
             if tok in ("-a", "--ask-for-approval") and i < len(parts) and not parts[i].startswith("-"):
                 i += 1
             continue
         if tok in ("-s", "--sandbox"):
-            saw_sandbox = True
-            out.append(tok)
-            if i + 1 < len(parts):
-                out.append(parts[i + 1])
+            if i + 1 < len(parts) and not parts[i + 1].startswith("-"):
+                out.extend(["-c", f'sandbox_mode="{parts[i + 1]}"'])
+                saw_sandbox = True
                 i += 2
             else:
                 i += 1
@@ -145,7 +147,7 @@ def _normalize_codex_extra_args(extra: str) -> list[str]:
         out.append(tok)
         i += 1
     if not saw_sandbox:
-        out.extend(["-s", "workspace-write"])
+        out.extend(["-c", 'sandbox_mode="workspace-write"'])
     return out
 
 
@@ -179,6 +181,58 @@ _EXEC_ONLY_BARE = {"--approve-for-me", "--oss"}
 
 def _toml_quote(value: str) -> str:
     return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+_APPROVE_FOR_ME = "--approve-for-me"
+
+
+def _sandbox_cli_to_config(parts: list[str]) -> list[str]:
+    """`--sandbox` is exclusive with --approve-for-me and with bypass (0.147+)."""
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        if parts[i] in ("-s", "--sandbox") and i + 1 < len(parts) and not str(parts[i + 1]).startswith("-"):
+            out.extend(["-c", f'sandbox_mode="{parts[i + 1]}"'])
+            i += 2
+            continue
+        out.append(parts[i])
+        i += 1
+    return out
+
+
+def _one_approval_mode(parts: list[str]) -> list[str]:
+    """Codex 0.147+: pick one exclusive family for every exec/resume.
+
+    ``--approve-for-me`` = auto-review + workspace-write.
+    ``--dangerously-bypass-approvals-and-sandbox`` = no approvals, no sandbox.
+    ``--sandbox`` / ``-s`` cannot pair with either of those.
+
+    Ducky chats need MCP tools without a human click (codex#24135), so bypass
+    wins. Never emit --approve-for-me or --sandbox on the same argv.
+    """
+    out: list[str] = []
+    i = 0
+    saw_bypass = False
+    while i < len(parts):
+        tok = parts[i]
+        if tok == _APPROVE_FOR_ME:
+            i += 1
+            continue
+        if tok in ("-s", "--sandbox"):
+            i += 2 if i + 1 < len(parts) and not str(parts[i + 1]).startswith("-") else 1
+            continue
+        if tok == _BYPASS_FLAG:
+            if not saw_bypass:
+                out.append(tok)
+                saw_bypass = True
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    if not saw_bypass:
+        out.append(_BYPASS_FLAG)
+    return out
 
 
 def _strip_exec_only(parts: list[str]) -> list[str]:
@@ -355,22 +409,12 @@ def build_codex_argv(
     for path in image_paths or []:
         # Codex exec natively attaches images to the initial prompt.
         argv.extend(["--image", path])
-    extra = _normalize_codex_extra_args(extra_args)
-    flags = list(extra_flags or [])
+    extra = _sandbox_cli_to_config(_normalize_codex_extra_args(extra_args))
+    flags = _sandbox_cli_to_config(list(extra_flags or []))
     if session_id:
-        rewritten: list[str] = []
-        i = 0
-        while i < len(extra):
-            if extra[i] in ("-s", "--sandbox") and i + 1 < len(extra):
-                rewritten.extend(["-c", f'sandbox_mode="{extra[i + 1]}"'])
-                i += 2
-                continue
-            rewritten.append(extra[i])
-            i += 1
-        extra = _strip_exec_only(rewritten)
+        extra = _strip_exec_only(extra)
         flags = _strip_exec_only(flags)
-    argv.extend(extra)
-    argv.extend(flags)
+    argv.extend(_one_approval_mode(extra + flags))
     if not _is_codex_auto_model(model):
         argv.extend(["-m", model])
     argv.append(prompt)
@@ -867,8 +911,6 @@ class CodexAdapter:
         extra_flags: list[str] = (
             list(_APPROVAL_FLAG) + list(_MCP_APPROVE_FLAG) + list(_BYPASS_APPROVALS)
         )
-        if not session_id:
-            extra_flags.append("--approve-for-me")
         write_codex_uefn_profile(mcp_config_path)
         extra_dirs: list[Path] = []
         if prompt_file is not None:

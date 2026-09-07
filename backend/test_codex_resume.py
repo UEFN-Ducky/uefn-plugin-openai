@@ -35,6 +35,8 @@ def test_followup_resumes_thread():
     )
     assert argv[1:4] == ["exec", "resume", "th-abc"]
     assert argv[-1] == "follow up"
+    assert "-s" not in argv
+    assert "--sandbox" not in argv
 
 
 def test_first_turn_has_no_resume():
@@ -46,6 +48,11 @@ def test_first_turn_has_no_resume():
         session_id="",
     )
     assert "resume" not in argv
+    assert "-s" not in argv
+    assert "--sandbox" not in argv
+    assert "--approve-for-me" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert 'sandbox_mode="workspace-write"' in argv
 
 
 def test_adapter_opts_into_resume():
@@ -76,9 +83,27 @@ def test_auto_model_omits_dash_m():
         session_id="",
     )
     assert "-m" not in argv
+    assert "--sandbox" not in argv
+    assert "-s" not in argv
     assert normalize_codex_model("default") == "auto"
     assert normalize_codex_model("") == "auto"
     assert normalize_codex_model("gpt-5") == "gpt-5"
+
+
+def test_first_turn_uses_bypass_not_approve_for_me():
+    argv = build_codex_argv(
+        binary="codex",
+        prompt="hello",
+        model="auto",
+        extra_args="--full-auto --approve-for-me",
+        session_id="",
+        extra_flags=["--dangerously-bypass-approvals-and-sandbox", "--approve-for-me"],
+    )
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert argv.count("--dangerously-bypass-approvals-and-sandbox") == 1
+    assert "--approve-for-me" not in argv
+    assert "-s" not in argv
+    assert "--sandbox" not in argv
 
 
 def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
@@ -128,7 +153,9 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert 'approval_policy="on-failure"' in first
     assert 'mcp_servers.uefn.default_tools_approval_mode="approve"' in first
     assert "--dangerously-bypass-approvals-and-sandbox" in first
-    assert "--approve-for-me" in first
+    assert "--approve-for-me" not in first
+    assert "-s" not in first
+    assert "--sandbox" not in first
     resume = build_codex_argv(
         binary="codex",
         prompt="continue",
@@ -205,6 +232,7 @@ if __name__ == "__main__":
     test_adapter_opts_into_resume()
     test_codex_models_without_api_key()
     test_auto_model_omits_dash_m()
+    test_first_turn_uses_bypass_not_approve_for_me()
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         write_home = root / "write"
