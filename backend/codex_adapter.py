@@ -63,6 +63,36 @@ def _codex_fallback_rows() -> list[dict[str, Any]]:
     return [_codex_row(mid, name) for mid, name in _CODEX_FALLBACK_MODELS]
 
 
+_model_fetch_inflight = False
+
+
+def _fetch_models_in_background(key: str) -> None:
+    """detect() runs every few seconds on the picker path and must never block on
+    HTTP (pricing + per-model docs took ~55s and froze every other agent's row).
+    Fill the cache off-thread, then re-publish detect so the picker updates."""
+    global _model_fetch_inflight
+    if _model_fetch_inflight:
+        return
+    _model_fetch_inflight = True
+
+    def _run() -> None:
+        global _model_fetch_inflight
+        try:
+            from .model_fetch import fetch_models
+
+            fetch_models(key)
+            from backend.agent.coding_agents.base import invalidate_detect_cache, kick_detect_refresh
+
+            invalidate_detect_cache()
+            kick_detect_refresh()
+        except Exception:
+            pass
+        finally:
+            _model_fetch_inflight = False
+
+    threading.Thread(target=_run, daemon=True, name="codex-model-fetch").start()
+
+
 def _codex_model_rows() -> list[dict[str, Any]]:
     """Picker rows. ChatGPT-login users get the fallback list; an API key adds live ids."""
     fallback = _codex_fallback_rows()
@@ -75,11 +105,15 @@ def _codex_model_rows() -> list[dict[str, Any]]:
     if not key:
         return fallback
     try:
-        from .model_fetch import fetch_models
+        from .model_fetch import cached_models
 
+        cached = cached_models(key)
+        if cached is None:
+            _fetch_models_in_background(key)
+            return fallback
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for info in fetch_models(key):
+        for info in cached:
             mid = (info.id or "").strip()
             if not mid or mid in seen:
                 continue

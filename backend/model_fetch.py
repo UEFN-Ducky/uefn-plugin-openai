@@ -71,6 +71,14 @@ def clear_model_cache() -> None:
 def fetch_models(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
     return _fetch_openai(api_key, verify=verify)
 
+
+def cached_models(api_key: str) -> list[ModelInfo] | None:
+    """In-memory list only — never touches the network. None = not fetched yet.
+    Age is ignored on purpose: a stale list beats flipping back to the fallback
+    rows every TTL while detect() polls."""
+    hit = _OPENAI_LIST_CACHE.get(_key_hash(api_key or ""))
+    return list(hit[1]) if hit is not None else None
+
 def _openai_model_price_keys(model_id: str, alias: str | None = None) -> list[str]:
     keys: list[str] = []
     for raw in (model_id, alias or ""):
