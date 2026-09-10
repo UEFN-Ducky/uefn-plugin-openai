@@ -1,7 +1,7 @@
 {
   "id": "openai",
   "kind": "plugin",
-  "version": "1.0.33",
+  "version": "1.0.34",
   "label": "OpenAI",
   "description": "OpenAI API key + Codex coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show OpenAI under Providers & Keys and Codex under Coding Agents.",
   "min_app_version": "1.0.523",
@@ -74,8 +74,29 @@
         {
           "target": "settings.llms.provider.agent",
           "title": "Codex",
-          "body": "Codex is OpenAI's coding agent. Detect finds the CLI. Keep it on to pick Codex in chat.",
+          "body": "Codex is OpenAI's coding agent. Detect finds the CLI (often under npm). Keep it on to pick Codex in chat.",
           "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.agent.detect",
+          "title": "Detect CLI",
+          "body": "Press Detect to find Codex on this machine. Leave the toggle on so it appears in the chat picker.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.plugin",
+          "title": "OpenAI prompt caching",
+          "body": "Cache markers let OpenAI reuse the stable system prefix across turns. Leave Enable OpenAI cache markers on to save input tokens.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.back",
+          "title": "Back",
+          "body": "Press Back to return to the provider list.",
+          "advance": "require_click",
           "mode": "rect"
         }
       ]
