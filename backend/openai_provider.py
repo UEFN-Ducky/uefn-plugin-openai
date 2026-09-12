@@ -31,6 +31,21 @@ def responses_effort(thinking_effort: str) -> str:
     return "low"
 
 
+def model_supports_thinking_effort(model: str) -> bool:
+    mid = (model or "").strip().lower()
+    return mid.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6")) or "astra" in mid
+
+
+def chat_reasoning_effort(model: str, thinking_effort: str) -> str | None:
+    """Chat Completions ``reasoning_effort``. Off omits the field."""
+    if not model_supports_thinking_effort(model):
+        return None
+    v = normalize_thinking_effort(thinking_effort)
+    if v in ("low", "medium", "high"):
+        return v
+    return None
+
+
 def to_responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for t in tools or []:
@@ -369,6 +384,9 @@ class OpenAIProvider:
         cache_key = (cache.prompt_cache_key if cache else "") or ""
         if cache_key:
             create_kwargs["prompt_cache_key"] = cache_key
+        effort = chat_reasoning_effort(self._model, self._thinking_effort)
+        if effort:
+            create_kwargs["reasoning_effort"] = effort
 
         stream = client.chat.completions.create(**create_kwargs)
         for chunk in stream:

@@ -298,6 +298,8 @@ def _openai_info_from_dashboard(
         cached = docs.get("price_cached_in")
     if cache_write is None:
         cache_write = docs.get("price_cache_write")
+    from .openai_provider import model_supports_thinking_effort
+
     return ModelInfo(
         id=model_id,
         display_name=str(alias or record.get("display_name") or model_id),
@@ -309,6 +311,7 @@ def _openai_info_from_dashboard(
         price_out=price_out,
         price_cached_in=cached,
         price_cache_write=cache_write,
+        supports_thinking_effort=model_supports_thinking_effort(model_id),
     )
 
 
@@ -415,6 +418,8 @@ def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
         if rec:
             info = _openai_info_from_dashboard(rec, mid, pricing_catalog, docs)
         else:
+            from .openai_provider import model_supports_thinking_effort
+
             info = ModelInfo(
                 id=mid,
                 display_name=mid,
@@ -423,6 +428,7 @@ def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
                 price_out=docs.get("price_out"),
                 price_cached_in=docs.get("price_cached_in"),
                 price_cache_write=docs.get("price_cache_write"),
+                supports_thinking_effort=model_supports_thinking_effort(mid),
             )
         models.append(info)
         seen.add(mid)

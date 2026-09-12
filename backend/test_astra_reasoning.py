@@ -16,6 +16,8 @@ for p in _here.parents:
 
 from backend.agent.providers.base import ProviderMessage, ToolCallRequest
 from openai_provider import (
+    chat_reasoning_effort,
+    model_supports_thinking_effort,
     responses_effort,
     to_responses_input,
     to_responses_tools,
@@ -29,6 +31,12 @@ def test_uses_responses_and_effort():
     assert not uses_responses_api("gpt-4o")
     assert responses_effort("off") == "low"
     assert responses_effort("high") == "high"
+    assert model_supports_thinking_effort("gpt-5.4")
+    assert model_supports_thinking_effort("o3-mini")
+    assert not model_supports_thinking_effort("gpt-4o")
+    assert chat_reasoning_effort("gpt-5.4", "high") == "high"
+    assert chat_reasoning_effort("gpt-5.4", "off") is None
+    assert chat_reasoning_effort("gpt-4o", "high") is None
 
 
 def test_tools_and_input_roundtrip():

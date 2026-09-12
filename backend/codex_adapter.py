@@ -434,6 +434,7 @@ def build_codex_argv(
     session_id: str,
     image_paths: list[str] | None = None,
     extra_flags: list[str] | None = None,
+    reasoning_effort: str = "",
 ) -> list[str]:
     """Argv for one `codex exec --json` turn; resumes ``session_id`` when set."""
     argv = [binary, "exec"]
@@ -451,6 +452,9 @@ def build_codex_argv(
     argv.extend(_one_approval_mode(extra + flags))
     if not _is_codex_auto_model(model):
         argv.extend(["-m", model])
+    effort = (reasoning_effort or "").strip().lower()
+    if effort in ("low", "medium", "high"):
+        argv.extend(["-c", f"model_reasoning_effort={effort}"])
     argv.append(prompt)
     return argv
 
@@ -954,6 +958,9 @@ class CodexAdapter:
             extra_dirs.append(skills)
         extra_flags.extend(_writable_roots_flag(extra_dirs))
         try:
+            from backend.agent.thinking_effort import normalize_thinking_effort
+
+            effort = normalize_thinking_effort(str((env or {}).get("DUCKY_THINKING_EFFORT") or ""))
             argv = build_codex_argv(
                 binary=binary,
                 prompt=launch_prompt,
@@ -962,6 +969,7 @@ class CodexAdapter:
                 session_id=session_id,
                 image_paths=list(image_paths or []),
                 extra_flags=extra_flags,
+                reasoning_effort=effort,
             )
             state = _CodexStream(conv_id, run_id, push)
             if session_id:

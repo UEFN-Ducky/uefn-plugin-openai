@@ -73,6 +73,7 @@ def register(api) -> None:
         tool_schema="openai",
         clear_model_cache=clear_model_cache,
         cache_mode="cached",
+        shows_thinking_effort=True,
     )
     api.register_coding_agent(
         "codex",
@@ -88,6 +89,7 @@ def register(api) -> None:
         install_help=_INSTALL_HELP,
         token_provider="openai",
         normalize_model=_normalize_codex_model,
+        shows_thinking_effort=True,
     )
     try:
         from .codex_adapter import heal_codex_approval_policy

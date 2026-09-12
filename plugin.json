@@ -1,10 +1,10 @@
 {
   "id": "openai",
   "kind": "plugin",
-  "version": "1.0.35",
+  "version": "1.0.36",
   "label": "OpenAI",
   "description": "OpenAI API key + Codex coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show OpenAI under Providers & Keys and Codex under Coding Agents.",
-  "min_app_version": "1.0.523",
+  "min_app_version": "1.2.45",
   "default_enabled": true,
   "secret_keys": [
     "openai"

@@ -39,6 +39,28 @@ def test_followup_resumes_thread():
     assert "--sandbox" not in argv
 
 
+def test_reasoning_effort_flag():
+    argv = build_codex_argv(
+        binary="codex",
+        prompt="hello",
+        model="gpt-5",
+        extra_args="",
+        session_id="",
+        reasoning_effort="high",
+    )
+    assert "model_reasoning_effort=high" in argv
+    off = build_codex_argv(
+        binary="codex",
+        prompt="hello",
+        model="gpt-5",
+        extra_args="",
+        session_id="",
+        reasoning_effort="off",
+    )
+    assert "model_reasoning_effort=high" not in off
+    assert not any(str(a).startswith("model_reasoning_effort=") for a in off)
+
+
 def test_first_turn_has_no_resume():
     argv = build_codex_argv(
         binary="codex",
@@ -228,6 +250,7 @@ if __name__ == "__main__":
     import tempfile
 
     test_followup_resumes_thread()
+    test_reasoning_effort_flag()
     test_first_turn_has_no_resume()
     test_adapter_opts_into_resume()
     test_codex_models_without_api_key()
