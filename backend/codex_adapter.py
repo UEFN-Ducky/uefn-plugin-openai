@@ -25,17 +25,16 @@ from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
 _CODEX_INSTALL_PS = r"irm https://chatgpt.com/codex/install.ps1 | iex"
 _CODEX_INSTALL_NPM = "npm install -g @openai/codex"
 
-# ChatGPT login (no API key) still runs these via `codex exec`. Live /v1/models
-# is merged on top when a key exists.
+# Last resort when ~/.codex/models_cache.json is missing (fresh CLI install).
+# Live picker rows come from that cache / `codex debug models` — ChatGPT login,
+# no API key. Same idea as Anthropic's public deprecations table.
 _CODEX_FALLBACK_MODELS: tuple[tuple[str, str], ...] = (
     ("auto", "Auto"),
-    ("gpt-5.1-codex", "GPT-5.1 Codex"),
-    ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
-    ("gpt-5-codex", "GPT-5 Codex"),
-    ("gpt-5", "GPT-5"),
-    ("gpt-5-mini", "GPT-5 Mini"),
-    ("o3", "o3"),
-    ("o4-mini", "o4-mini"),
+    ("gpt-6-astra", "GPT-6 Astra"),
+    ("gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("gpt-5.6-terra", "GPT-5.6 Terra"),
+    ("gpt-5.6-luna", "GPT-5.6 Luna"),
+    ("gpt-5.5", "GPT-5.5"),
 )
 
 
@@ -66,10 +65,65 @@ def _codex_fallback_rows() -> list[dict[str, Any]]:
 _model_fetch_inflight = False
 
 
-def _fetch_models_in_background(key: str) -> None:
-    """detect() runs every few seconds on the picker path and must never block on
-    HTTP (pricing + per-model docs took ~55s and froze every other agent's row).
-    Fill the cache off-thread, then re-publish detect so the picker updates."""
+def _codex_catalog_path() -> Path:
+    return Path.home() / ".codex" / "models_cache.json"
+
+
+def parse_codex_catalog(data: Any) -> list[dict[str, Any]]:
+    """Visible Codex CLI models from `models_cache.json` / `codex debug models` JSON."""
+    items: list[Any] = []
+    if isinstance(data, dict):
+        raw = data.get("models")
+        if isinstance(raw, list):
+            items = raw
+    elif isinstance(data, list):
+        items = data
+    parsed: list[tuple[int, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slug = str(item.get("slug") or item.get("id") or "").strip()
+        if not slug or slug in seen:
+            continue
+        vis = str(item.get("visibility") or "list").strip().lower()
+        if vis not in ("list", "listed", "visible", ""):
+            continue
+        seen.add(slug)
+        mods = item.get("input_modalities")
+        extra: dict[str, Any] = {
+            "supports_tools": True,
+            "supports_vision": isinstance(mods, list)
+            and any(str(x).lower() == "image" for x in mods),
+            "supports_web_search": bool(item.get("supports_search_tool")),
+        }
+        ctx = item.get("context_window") or item.get("max_context_window")
+        try:
+            if ctx:
+                extra["context_limit"] = int(ctx)
+        except (TypeError, ValueError):
+            pass
+        name = str(item.get("display_name") or item.get("name") or slug)
+        try:
+            order = int(item.get("priority"))
+        except (TypeError, ValueError):
+            order = 9999
+        parsed.append((order, _codex_row(slug, name, **extra)))
+    parsed.sort(key=lambda t: (t[0], t[1]["id"]))
+    return [row for _, row in parsed]
+
+
+def _read_codex_cli_catalog() -> list[dict[str, Any]] | None:
+    try:
+        data = json.loads(_codex_catalog_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    rows = parse_codex_catalog(data)
+    return rows or None
+
+
+def _refresh_cli_catalog_in_background() -> None:
+    """Ask the installed CLI for the ChatGPT-login catalog. Never blocks detect()."""
     global _model_fetch_inflight
     if _model_fetch_inflight:
         return
@@ -78,9 +132,12 @@ def _fetch_models_in_background(key: str) -> None:
     def _run() -> None:
         global _model_fetch_inflight
         try:
-            from .model_fetch import fetch_models
+            from .cli_update import _run as run_cli
+            from .cli_update import resolve_bin
 
-            fetch_models(key)
+            binary = resolve_bin()
+            if binary:
+                run_cli([binary, "debug", "models"], timeout_s=30)
             from backend.agent.coding_agents.base import invalidate_detect_cache, kick_detect_refresh
 
             invalidate_detect_cache()
@@ -94,49 +151,20 @@ def _fetch_models_in_background(key: str) -> None:
 
 
 def _codex_model_rows() -> list[dict[str, Any]]:
-    """Picker rows. ChatGPT-login users get the fallback list; an API key adds live ids."""
-    fallback = _codex_fallback_rows()
-    try:
-        from backend.agent.secrets import get_key
-
-        key = (get_key("openai") or "").strip()
-    except Exception:
-        return fallback
-    if not key:
-        return fallback
-    try:
-        from .model_fetch import cached_models
-
-        cached = cached_models(key)
-        if cached is None:
-            _fetch_models_in_background(key)
-            return fallback
-        rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for info in cached:
-            mid = (info.id or "").strip()
-            if not mid or mid in seen:
-                continue
-            seen.add(mid)
-            extra: dict[str, Any] = {
-                "supports_vision": bool(info.supports_vision),
-                "supports_tools": True,
-                "supports_web_search": bool(info.supports_web_search),
-            }
-            if info.context_limit:
-                extra["context_limit"] = int(info.context_limit)
-            if info.price_in is not None:
-                extra["price_in"] = info.price_in
-            if info.price_out is not None:
-                extra["price_out"] = info.price_out
-            rows.append(_codex_row(mid, info.display_name or mid, **extra))
-        if not rows:
-            return fallback
-        if "auto" not in seen:
-            rows.insert(0, _codex_row("auto", "Auto"))
-        return rows
-    except Exception:
-        return fallback
+    """Picker rows from the Codex CLI catalog (ChatGPT login, no API key)."""
+    catalog = _read_codex_cli_catalog()
+    if not catalog:
+        _refresh_cli_catalog_in_background()
+        return _codex_fallback_rows()
+    rows: list[dict[str, Any]] = [_codex_row("auto", "Auto")]
+    seen = {"auto"}
+    for row in catalog:
+        mid = str(row.get("id") or "").strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        rows.append(row)
+    return rows
 
 
 def _codex_missing_status() -> str:

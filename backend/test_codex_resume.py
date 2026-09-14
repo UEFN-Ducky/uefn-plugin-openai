@@ -21,6 +21,7 @@ from codex_adapter import (
     build_codex_argv,
     heal_codex_approval_policy,
     normalize_codex_model,
+    parse_codex_catalog,
     write_codex_uefn_profile,
 )
 
@@ -81,19 +82,88 @@ def test_adapter_opts_into_resume():
     assert CodexAdapter.capabilities.resume is True
 
 
-def test_codex_models_without_api_key():
-    import backend.agent.secrets as secrets
+def test_parse_codex_catalog_lists_visible_only():
+    rows = parse_codex_catalog(
+        {
+            "models": [
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "visibility": "list",
+                    "priority": 1,
+                    "input_modalities": ["text", "image"],
+                    "supports_search_tool": True,
+                    "context_window": 272000,
+                },
+                {
+                    "slug": "gpt-5.6-terra",
+                    "display_name": "GPT-5.6-Terra",
+                    "visibility": "list",
+                    "priority": 7,
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "visibility": "hide",
+                    "priority": 43,
+                },
+                {"slug": "gpt-reserve", "visibility": "hide"},
+            ]
+        }
+    )
+    ids = [r["id"] for r in rows]
+    assert ids == ["gpt-6-astra", "gpt-5.6-terra"]
+    assert rows[0]["name"] == "GPT-6-Astra"
+    assert rows[0]["supports_vision"] is True
+    assert rows[0]["supports_web_search"] is True
+    assert rows[0]["context_limit"] == 272000
 
-    orig = secrets.get_key
-    secrets.get_key = lambda *_a, **_k: ""
+
+def test_codex_models_reads_cli_cache(tmp_path: Path):
+    cache = tmp_path / "models_cache.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list", "priority": 1},
+                    {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "visibility": "list", "priority": 7},
+                    {"slug": "codex-auto-review", "visibility": "hide"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    import codex_adapter as ca
+
+    orig = ca._codex_catalog_path
+    ca._codex_catalog_path = lambda: cache
+    try:
+        rows = _codex_model_rows()
+        ids = [r["id"] for r in rows]
+        assert ids[:3] == ["auto", "gpt-6-astra", "gpt-5.6-terra"]
+        assert "codex-auto-review" not in ids
+        assert all(r.get("supports_tools") for r in rows)
+    finally:
+        ca._codex_catalog_path = orig
+
+
+def test_codex_models_without_cli_cache_uses_fallback(tmp_path: Path):
+    import codex_adapter as ca
+
+    orig_path = ca._codex_catalog_path
+    orig_refresh = ca._refresh_cli_catalog_in_background
+    ca._codex_catalog_path = lambda: tmp_path / "missing.json"
+    ca._refresh_cli_catalog_in_background = lambda: None
     try:
         rows = _codex_model_rows()
         ids = {r["id"] for r in rows}
         assert "auto" in ids
-        assert "gpt-5" in ids
-        assert all(r.get("supports_tools") for r in rows)
+        assert "gpt-6-astra" in ids
+        assert "gpt-5.6-terra" in ids
+        assert "gpt-5.1-codex" not in ids
     finally:
-        secrets.get_key = orig
+        ca._codex_catalog_path = orig_path
+        ca._refresh_cli_catalog_in_background = orig_refresh
 
 
 def test_auto_model_omits_dash_m():
@@ -253,7 +323,14 @@ if __name__ == "__main__":
     test_reasoning_effort_flag()
     test_first_turn_has_no_resume()
     test_adapter_opts_into_resume()
-    test_codex_models_without_api_key()
+    test_parse_codex_catalog_lists_visible_only()
+    with tempfile.TemporaryDirectory() as raw:
+        cache_home = Path(raw) / "cache"
+        cache_home.mkdir()
+        test_codex_models_reads_cli_cache(cache_home)
+        miss_home = Path(raw) / "miss"
+        miss_home.mkdir()
+        test_codex_models_without_cli_cache_uses_fallback(miss_home)
     test_auto_model_omits_dash_m()
     test_first_turn_uses_bypass_not_approve_for_me()
     with tempfile.TemporaryDirectory() as raw:

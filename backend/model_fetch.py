@@ -274,7 +274,7 @@ def _docs_spec(model_id: str) -> dict[str, Any]:
 
 def _looks_like_chat_model(model_id: str) -> bool:
     m = (model_id or "").strip().lower()
-    return m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt"))
+    return m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")) or "astra" in m
 
 
 def _openai_info_from_dashboard(
