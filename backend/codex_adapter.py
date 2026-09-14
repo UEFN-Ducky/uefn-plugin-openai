@@ -321,6 +321,52 @@ def _writable_roots_flag(dirs: list[Path]) -> list[str]:
     return ["-c", f"sandbox_workspace_write.writable_roots=[{roots}]"]
 
 
+# Codex rejects a second [mcp_servers.uefn] (duplicate key). Older Ducky / desktop
+# writes leave an unmarked copy; the marked block is the one we own.
+_UEFN_TOML_TABLES = ("mcp_servers.uefn", "mcp_servers.uefn.env")
+
+
+def _strip_toml_tables(text: str, names: tuple[str, ...]) -> str:
+    want = {n.lower() for n in names}
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            skipping = s[1:-1].strip().lower() in want
+        if skipping:
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def _split_marked_toml(text: str) -> tuple[str, str | None]:
+    start = text.find(_TOML_BEGIN)
+    end = text.find(_TOML_END)
+    if start >= 0 and end > start:
+        block = text[start : end + len(_TOML_END)]
+        outside = text[:start] + text[end + len(_TOML_END) :]
+        return outside, block
+    if start >= 0:
+        return text[:start], None
+    return text, None
+
+
+def _join_marked_toml(outside: str, block: str) -> str:
+    if outside.strip():
+        return outside.rstrip() + "\n\n" + block.lstrip("\n")
+    return block if block.endswith("\n") else block + "\n"
+
+
+def _dedupe_unmarked_uefn(text: str) -> str:
+    """Drop unmarked [mcp_servers.uefn] copies when the Ducky block already has one."""
+    outside, block = _split_marked_toml(text)
+    if not block or "[mcp_servers.uefn]" not in block:
+        return text
+    cleaned = _strip_toml_tables(outside, _UEFN_TOML_TABLES)
+    return _join_marked_toml(cleaned, block)
+
+
 def _merge_marked_toml(path: Path, body: str) -> None:
     block = f"{_TOML_BEGIN}\n{body.rstrip()}\n{_TOML_END}\n"
     existing = ""
@@ -329,19 +375,14 @@ def _merge_marked_toml(path: Path, body: str) -> None:
             existing = path.read_text(encoding="utf-8")
         except OSError:
             existing = ""
-    start = existing.find(_TOML_BEGIN)
-    end = existing.find(_TOML_END)
-    if start >= 0 and end > start:
-        new = existing[:start] + block + existing[end + len(_TOML_END) :].lstrip("\n")
-    elif start >= 0:
-        new = existing[:start] + block
-    else:
-        new = existing.rstrip() + ("\n\n" if existing.strip() else "") + block
-    path.write_text(new, encoding="utf-8")
+    outside, _old = _split_marked_toml(existing)
+    if "[mcp_servers.uefn]" in body:
+        outside = _strip_toml_tables(outside, _UEFN_TOML_TABLES)
+    path.write_text(_join_marked_toml(outside, block), encoding="utf-8")
 
 
 def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
-    """Rewrite stale `never` so Ducky MCP tools run without a user click."""
+    """Rewrite stale `never` and drop duplicate [mcp_servers.uefn] on every load."""
     home = Path(codex_home) if codex_home else Path.home() / ".codex"
     try:
         home.mkdir(parents=True, exist_ok=True)
@@ -371,6 +412,7 @@ def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
             "[mcp_servers.uefn]", f"[mcp_servers.uefn]\n{_MCP_APPROVE_TOML}", 1
         )
         changed = True
+    new = _dedupe_unmarked_uefn(new)
     if new != text:
         try:
             cfg.write_text(new, encoding="utf-8")

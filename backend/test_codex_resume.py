@@ -278,6 +278,62 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert write_codex_uefn_profile("", codex_home=home) == ""
 
 
+def test_write_strips_unmarked_uefn_duplicate(tmp_path: Path):
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "uefn": {
+                        "command": r"C:\Ducky\UEFN-Ducky-Bridge.exe",
+                        "args": ["bridge"],
+                        "env": {"DUCKY_CONV_ID": "chat-1"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        "[mcp_servers.node_repl]\ncommand = \"x\"\n\n"
+        "[mcp_servers.uefn]\ncommand = \"old.exe\"\n"
+        "[mcp_servers.uefn.env]\nFOO = \"1\"\n",
+        encoding="utf-8",
+    )
+    write_codex_uefn_profile(str(mcp), codex_home=home)
+    cfg = (home / "config.toml").read_text(encoding="utf-8")
+    headers = [ln.strip() for ln in cfg.splitlines() if ln.startswith("[")]
+    assert headers.count("[mcp_servers.uefn]") == 1
+    assert headers.count("[mcp_servers.uefn.env]") == 1
+    assert "node_repl" in cfg
+    assert "old.exe" not in cfg
+    assert "UEFN-Ducky-Bridge.exe" in cfg
+
+
+def test_heal_strips_unmarked_uefn_on_plugin_load(tmp_path: Path):
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        "[mcp_servers.node_repl]\ncommand = \"x\"\n\n"
+        "[mcp_servers.uefn]\ncommand = \"old.exe\"\n\n"
+        "# BEGIN UEFN-DUCKY\n"
+        'approval_policy = "on-failure"\n'
+        "[mcp_servers.uefn]\n"
+        'command = "bridge.exe"\n'
+        "# END UEFN-DUCKY\n",
+        encoding="utf-8",
+    )
+    assert heal_codex_approval_policy(codex_home=home) is True
+    cfg = (home / "config.toml").read_text(encoding="utf-8")
+    headers = [ln.strip() for ln in cfg.splitlines() if ln.startswith("[")]
+    assert headers.count("[mcp_servers.uefn]") == 1
+    assert "old.exe" not in cfg
+    assert "bridge.exe" in cfg
+    assert "node_repl" in cfg
+
+
 def test_heal_codex_approval_inserts_without_wiping_mcp(tmp_path: Path):
     home = tmp_path / "codex-home-insert"
     home.mkdir()
@@ -338,6 +394,12 @@ if __name__ == "__main__":
         write_home = root / "write"
         write_home.mkdir()
         test_writes_codex_profile_from_ducky_mcp(write_home)
+        dup_home = root / "dup"
+        dup_home.mkdir()
+        test_write_strips_unmarked_uefn_duplicate(dup_home)
+        load_home = root / "load"
+        load_home.mkdir()
+        test_heal_strips_unmarked_uefn_on_plugin_load(load_home)
         heal_home = root / "heal"
         heal_home.mkdir()
         test_heal_codex_approval_inserts_without_wiping_mcp(heal_home)
