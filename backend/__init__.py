@@ -73,6 +73,7 @@ def register(api) -> None:
         tool_schema="openai",
         clear_model_cache=clear_model_cache,
         cache_mode="cached",
+        cache_ttl_s=300,
         shows_thinking_effort=True,
     )
     api.register_coding_agent(
