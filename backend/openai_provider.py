@@ -26,7 +26,7 @@ def uses_responses_api(model: str) -> bool:
 def responses_effort(thinking_effort: str) -> str:
     """Astra rejects `none`; Off in the UI maps to the lowest supported effort."""
     v = normalize_thinking_effort(thinking_effort)
-    if v in ("low", "medium", "high"):
+    if v in ("low", "medium", "high", "xhigh"):
         return v
     return "low"
 
@@ -36,12 +36,35 @@ def model_supports_thinking_effort(model: str) -> bool:
     return mid.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6")) or "astra" in mid
 
 
+def thinking_menu(model: str) -> dict | None:
+    if not model_supports_thinking_effort(model):
+        return None
+    mid = (model or "").strip().lower()
+    astra = "astra" in mid or mid.startswith("gpt-6")
+    off_hint = (
+        "lowest available (vendor rejects none)"
+        if astra
+        else "No extended thinking"
+    )
+    levels: list[dict] = [
+        {"id": "off", "label": "Off", "thinking_tokens": 0, "hint": off_hint},
+        {"id": "low", "label": "Low", "thinking_tokens": None, "hint": "reasoning_effort=low, no token cap"},
+        {"id": "medium", "label": "Med", "thinking_tokens": None, "hint": "reasoning_effort=medium, no token cap"},
+        {"id": "high", "label": "High", "thinking_tokens": None, "hint": "reasoning_effort=high, no token cap"},
+    ]
+    if mid.startswith("gpt-5"):
+        levels.append(
+            {"id": "xhigh", "label": "Extra", "thinking_tokens": None, "hint": "reasoning_effort=xhigh, no token cap"}
+        )
+    return {"lo": "Faster", "hi": "Smarter", "levels": levels}
+
+
 def chat_reasoning_effort(model: str, thinking_effort: str) -> str | None:
     """Chat Completions ``reasoning_effort``. Off omits the field."""
     if not model_supports_thinking_effort(model):
         return None
     v = normalize_thinking_effort(thinking_effort)
-    if v in ("low", "medium", "high"):
+    if v in ("low", "medium", "high", "xhigh"):
         return v
     return None
 

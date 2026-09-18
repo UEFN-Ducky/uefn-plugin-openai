@@ -19,6 +19,7 @@ from openai_provider import (
     chat_reasoning_effort,
     model_supports_thinking_effort,
     responses_effort,
+    thinking_menu,
     to_responses_input,
     to_responses_tools,
     uses_responses_api,
@@ -37,6 +38,11 @@ def test_uses_responses_and_effort():
     assert chat_reasoning_effort("gpt-5.4", "high") == "high"
     assert chat_reasoning_effort("gpt-5.4", "off") is None
     assert chat_reasoning_effort("gpt-4o", "high") is None
+    menu = thinking_menu("gpt-5.4")
+    assert menu and menu["levels"][0]["id"] == "off"
+    assert menu["levels"][0]["thinking_tokens"] == 0
+    assert any(l["id"] == "xhigh" and l["thinking_tokens"] is None for l in menu["levels"])
+    assert thinking_menu("gpt-4o") is None
 
 
 def test_tools_and_input_roundtrip():

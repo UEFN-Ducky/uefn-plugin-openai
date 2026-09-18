@@ -7,6 +7,7 @@ import html
 import logging
 import re
 import time
+from dataclasses import fields
 from typing import Any
 
 from backend.agent.model_fetch import (
@@ -23,6 +24,12 @@ from backend.agent.model_fetch import (
 _log = logging.getLogger(__name__)
 _CACHE_MAX = 512
 _CACHE_TTL_S = 6 * 3600.0
+_MODEL_INFO_FIELDS = {f.name for f in fields(ModelInfo)}
+
+
+def _model_info(**kw: Any) -> ModelInfo:
+    """Drop unknown fields so an older host ModelInfo does not TypeError."""
+    return ModelInfo(**{k: v for k, v in kw.items() if k in _MODEL_INFO_FIELDS})
 
 
 _OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing"
@@ -298,9 +305,9 @@ def _openai_info_from_dashboard(
         cached = docs.get("price_cached_in")
     if cache_write is None:
         cache_write = docs.get("price_cache_write")
-    from .openai_provider import model_supports_thinking_effort
+    from .openai_provider import model_supports_thinking_effort, thinking_menu
 
-    return ModelInfo(
+    return _model_info(
         id=model_id,
         display_name=str(alias or record.get("display_name") or model_id),
         supports_vision="image_content" in features,
@@ -312,6 +319,7 @@ def _openai_info_from_dashboard(
         price_cached_in=cached,
         price_cache_write=cache_write,
         supports_thinking_effort=model_supports_thinking_effort(model_id),
+        thinking_menu=thinking_menu(model_id),
     )
 
 
@@ -418,9 +426,9 @@ def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
         if rec:
             info = _openai_info_from_dashboard(rec, mid, pricing_catalog, docs)
         else:
-            from .openai_provider import model_supports_thinking_effort
+            from .openai_provider import model_supports_thinking_effort, thinking_menu
 
-            info = ModelInfo(
+            info = _model_info(
                 id=mid,
                 display_name=mid,
                 context_limit=docs.get("context_limit"),
@@ -429,6 +437,7 @@ def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
                 price_cached_in=docs.get("price_cached_in"),
                 price_cache_write=docs.get("price_cache_write"),
                 supports_thinking_effort=model_supports_thinking_effort(mid),
+                thinking_menu=thinking_menu(mid),
             )
         models.append(info)
         seen.add(mid)
