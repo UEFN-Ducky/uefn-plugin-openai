@@ -18,6 +18,12 @@ def _fetch_models(api_key: str, **kw: Any) -> Any:
     return fetch_models(api_key, verify=bool(kw.get("verify", False)))
 
 
+def _fetch_usage(api_key: str, **kw: Any) -> Any:
+    from .usage import fetch_usage
+
+    return fetch_usage(api_key, model=str(kw.get("model") or ""))
+
+
 def _resolve_api_fallback(model_id: str) -> tuple[str, str] | None:
     from backend.agent.secrets import has_key
 
@@ -69,6 +75,7 @@ def register(api) -> None:
         "openai",
         factory=lambda api_key, model, **kw: OpenAIProvider(api_key, model, **kw),
         fetch_models=_fetch_models,
+        fetch_usage=_fetch_usage,
         test_key_model="gpt-4o-mini",
         tool_schema="openai",
         clear_model_cache=clear_model_cache,
