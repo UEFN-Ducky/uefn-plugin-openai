@@ -117,6 +117,10 @@ def test_parse_codex_catalog_lists_visible_only():
     assert rows[0]["supports_vision"] is True
     assert rows[0]["supports_web_search"] is True
     assert rows[0]["context_limit"] == 272000
+    astra_menu = rows[0].get("thinking_menu") or {}
+    assert [lvl["id"] for lvl in astra_menu.get("levels") or []][:2] == ["off", "low"]
+    terra_menu = rows[1].get("thinking_menu") or {}
+    assert any(lvl.get("id") == "xhigh" for lvl in terra_menu.get("levels") or [])
 
 
 def test_codex_models_reads_cli_cache(tmp_path: Path):

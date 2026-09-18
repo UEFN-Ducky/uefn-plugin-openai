@@ -55,6 +55,16 @@ def _codex_row(model_id: str, name: str, **extra: Any) -> dict[str, Any]:
         "supports_tools": True,
     }
     row.update(extra)
+    if row.get("thinking_menu") is None:
+        try:
+            from .openai_provider import thinking_menu
+        except ImportError:
+            from openai_provider import thinking_menu
+
+        menu = thinking_menu(model_id)
+        if menu:
+            row["thinking_menu"] = menu
+            row.setdefault("supports_thinking_effort", True)
     return row
 
 

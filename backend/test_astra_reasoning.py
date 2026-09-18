@@ -42,7 +42,10 @@ def test_uses_responses_and_effort():
     assert menu and menu["levels"][0]["id"] == "off"
     assert menu["levels"][0]["thinking_tokens"] == 0
     assert any(l["id"] == "xhigh" and l["thinking_tokens"] is None for l in menu["levels"])
+    astra = thinking_menu("gpt-6-astra")
+    assert astra and [l["id"] for l in astra["levels"]] == ["off", "low", "medium", "high"]
     assert thinking_menu("gpt-4o") is None
+    assert thinking_menu("auto") is None
 
 
 def test_tools_and_input_roundtrip():
