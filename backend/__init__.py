@@ -115,4 +115,7 @@ def register(api) -> None:
         _heal_default_model_if_codex_only()
     except Exception:
         pass
+    from . import graph_nodes
+
+    graph_nodes.register_nodes(api)
     api.log("OpenAI gateway contribution active (Providers + Codex)")

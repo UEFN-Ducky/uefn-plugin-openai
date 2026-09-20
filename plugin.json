@@ -1,9 +1,9 @@
 {
   "id": "openai",
   "kind": "plugin",
-  "version": "1.0.43",
+  "version": "1.0.44",
   "label": "OpenAI",
-  "description": "OpenAI API key + Codex coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show OpenAI under Providers & Keys and Codex under Coding Agents.",
+  "description": "OpenAI API key + Codex coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show OpenAI under Providers & Keys and Codex under Coding Agents.",
   "min_app_version": "1.2.45",
   "default_enabled": true,
   "secret_keys": [
@@ -60,7 +60,7 @@
         {
           "target": "settings.llms.provider.key",
           "title": "API key or Codex",
-          "body": "Paste an OpenAI API key here to use GPT in Ducky chats. No key? Skip this and use Codex on this same slide — ChatGPT login is enough.",
+          "body": "Paste an OpenAI API key here to use GPT in Ducky chats. No key? Skip this and use Codex on this same slide \u2014 ChatGPT login is enough.",
           "advance": "next",
           "mode": "rect"
         },
@@ -98,6 +98,149 @@
           "body": "Press Back to return to the provider list.",
           "advance": "require_click",
           "mode": "rect"
+        }
+      ]
+    },
+    "automations": {
+      "nodes": [
+        {
+          "id": "openai.complete",
+          "label": "OpenAI complete",
+          "group": "OpenAI",
+          "description": "One-shot prompt through the OpenAI gateway. Writes text onto the run.",
+          "config_fields": [
+            {
+              "id": "prompt",
+              "label": "Prompt",
+              "type": "textarea"
+            },
+            {
+              "id": "model",
+              "label": "Model",
+              "type": "model",
+              "provider": "openai"
+            }
+          ]
+        },
+        {
+          "id": "openai.image",
+          "label": "OpenAI image",
+          "group": "OpenAI",
+          "description": "Generate an image with the OpenAI Images API.",
+          "config_fields": [
+            {
+              "id": "prompt",
+              "label": "Prompt",
+              "type": "textarea"
+            },
+            {
+              "id": "model",
+              "label": "Model",
+              "type": "select",
+              "options": [
+                {
+                  "id": "gpt-image-1",
+                  "label": "gpt-image-1"
+                },
+                {
+                  "id": "dall-e-3",
+                  "label": "dall-e-3"
+                }
+              ]
+            },
+            {
+              "id": "size",
+              "label": "Size",
+              "type": "select",
+              "options": [
+                {
+                  "id": "1024x1024",
+                  "label": "1024\u00d71024"
+                },
+                {
+                  "id": "1536x1024",
+                  "label": "1536\u00d71024"
+                },
+                {
+                  "id": "1024x1536",
+                  "label": "1024\u00d71536"
+                }
+              ]
+            },
+            {
+              "id": "quality",
+              "label": "Quality",
+              "type": "select",
+              "options": [
+                {
+                  "id": "low",
+                  "label": "low"
+                },
+                {
+                  "id": "medium",
+                  "label": "medium"
+                },
+                {
+                  "id": "high",
+                  "label": "high"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "templates": [
+        {
+          "id": "openai-complete",
+          "label": "OpenAI complete",
+          "icon": "\u2728",
+          "systems": [
+            "pipeline"
+          ],
+          "description": "Chat prompt through OpenAI, then finish.",
+          "graph": {
+            "nodes": [
+              {
+                "id": "s",
+                "type": "start.chat",
+                "x": 40,
+                "y": 80,
+                "config": {},
+                "label": "Chat",
+                "description": ""
+              },
+              {
+                "id": "c",
+                "type": "openai.complete",
+                "x": 280,
+                "y": 80,
+                "config": {},
+                "label": "Complete",
+                "description": ""
+              },
+              {
+                "id": "f",
+                "type": "pipeline.finish",
+                "x": 520,
+                "y": 80,
+                "config": {},
+                "label": "Finish",
+                "description": ""
+              }
+            ],
+            "edges": [
+              {
+                "source": "s",
+                "target": "c",
+                "kind": "main"
+              },
+              {
+                "source": "c",
+                "target": "f",
+                "kind": "main"
+              }
+            ]
+          }
         }
       ]
     }
