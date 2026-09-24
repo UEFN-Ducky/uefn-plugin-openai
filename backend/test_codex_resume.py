@@ -18,12 +18,28 @@ for p in _here.parents:
 from codex_adapter import (
     CodexAdapter,
     _codex_model_rows,
+    _writable_roots_flag,
     build_codex_argv,
+    codex_extra_dirs,
     heal_codex_approval_policy,
     normalize_codex_model,
     parse_codex_catalog,
     write_codex_uefn_profile,
 )
+
+
+def test_recent_project_is_a_writable_root_but_cwd_is_not(tmp_path, monkeypatch):
+    active = tmp_path / "ExampleProject1"
+    other = tmp_path / "Roguelike"
+    active.mkdir()
+    other.mkdir()
+    import frontend.ui_web.recent_projects as recent
+
+    monkeypatch.setattr(recent, "load_recent_projects", lambda: [str(active), str(other)])
+    dirs = codex_extra_dirs(str(active))
+    flag = " ".join(_writable_roots_flag(dirs))
+    assert "Roguelike" in flag
+    assert "ExampleProject1" not in flag
 
 
 def test_followup_resumes_thread():

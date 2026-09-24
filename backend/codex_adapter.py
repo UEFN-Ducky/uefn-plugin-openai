@@ -7,6 +7,7 @@ id this adapter returns and passes it back on the next turn.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import threading
 import time
@@ -321,6 +322,24 @@ def _strip_exec_only(parts: list[str]) -> list[str]:
             continue
         out.append(tok)
         i += 1
+    return out
+
+
+def codex_extra_dirs(cwd: str) -> list[Path]:
+    """Added projects besides cwd. Codex sandbox writes are limited to these roots."""
+    try:
+        from frontend.ui_web.recent_projects import load_recent_projects
+    except Exception:
+        return []
+    cwd_key = os.path.normcase(str(Path(cwd).resolve()))
+    out: list[Path] = []
+    for item in load_recent_projects():
+        path = Path(item)
+        if not path.is_dir():
+            continue
+        if os.path.normcase(str(path.resolve())) == cwd_key:
+            continue
+        out.append(path)
     return out
 
 
@@ -1036,6 +1055,7 @@ class CodexAdapter:
         skills = Path.home() / ".claude" / "skills"
         if skills.is_dir():
             extra_dirs.append(skills)
+        extra_dirs.extend(codex_extra_dirs(cwd))
         extra_flags.extend(_writable_roots_flag(extra_dirs))
         try:
             from backend.agent.thinking_effort import normalize_thinking_effort
