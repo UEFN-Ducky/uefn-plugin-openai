@@ -524,6 +524,12 @@ def write_codex_uefn_profile(
     return _CODEX_PROFILE
 
 
+# Long Blender/UEFN chats resume one Codex thread for hours; screenshot-heavy
+# threads near ~190k tokens got their stream dropped by the server before any
+# reply. Codex compacts before the turn once past this — far below its default.
+_AUTO_COMPACT_TOKENS = 150_000
+
+
 def build_codex_argv(
     *,
     binary: str,
@@ -554,6 +560,8 @@ def build_codex_argv(
     effort = (reasoning_effort or "").strip().lower()
     if effort in ("low", "medium", "high"):
         argv.extend(["-c", f"model_reasoning_effort={effort}"])
+    if not any("model_auto_compact_token_limit" in str(a) for a in argv):
+        argv.extend(["-c", f"model_auto_compact_token_limit={_AUTO_COMPACT_TOKENS}"])
     argv.append(prompt)
     return argv
 

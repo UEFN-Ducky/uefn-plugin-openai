@@ -56,6 +56,20 @@ def test_followup_resumes_thread():
     assert "--sandbox" not in argv
 
 
+def test_resume_compacts_before_the_thread_gets_too_big():
+    argv = build_codex_argv(binary="codex", prompt="go", model="gpt-5", extra_args="", session_id="th-abc")
+    assert "model_auto_compact_token_limit=150000" in argv
+    assert argv[-1] == "go"
+    own = build_codex_argv(
+        binary="codex",
+        prompt="go",
+        model="gpt-5",
+        extra_args="-c model_auto_compact_token_limit=90000",
+        session_id="th-abc",
+    )
+    assert sum("model_auto_compact_token_limit" in a for a in own) == 1
+
+
 def test_reasoning_effort_flag():
     argv = build_codex_argv(
         binary="codex",
@@ -396,6 +410,7 @@ if __name__ == "__main__":
     import tempfile
 
     test_followup_resumes_thread()
+    test_resume_compacts_before_the_thread_gets_too_big()
     test_reasoning_effort_flag()
     test_first_turn_has_no_resume()
     test_adapter_opts_into_resume()
