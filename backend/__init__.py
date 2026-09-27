@@ -34,8 +34,8 @@ def _resolve_api_fallback(model_id: str) -> tuple[str, str] | None:
 
 
 def _skills_dir() -> str:
-    # Codex reads SKILL.md from the Claude skills tree when present.
-    return str(Path.home() / ".claude" / "skills")
+    # Same folder Apply writes beside ~/.codex/config.toml.
+    return str(Path.home() / ".codex" / "skills")
 
 
 def _normalize_codex_model(model: str) -> str:
@@ -99,6 +99,7 @@ def register(api) -> None:
         normalize_model=_normalize_codex_model,
         shows_thinking_effort=True,
     )
+    api.register_ide_hookup("codex", label="Codex")
     try:
         from .codex_adapter import heal_codex_approval_policy
 
@@ -118,4 +119,4 @@ def register(api) -> None:
     from . import graph_nodes
 
     graph_nodes.register_nodes(api)
-    api.log("OpenAI gateway contribution active (Providers + Codex)")
+    api.log("OpenAI gateway contribution active (Providers + Codex + IDE)")

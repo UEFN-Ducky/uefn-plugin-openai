@@ -1,7 +1,7 @@
 {
   "id": "openai",
   "kind": "plugin",
-  "version": "1.0.45",
+  "version": "1.0.46",
   "label": "OpenAI",
   "description": "OpenAI API key + Codex coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show OpenAI under Providers & Keys and Codex under Coding Agents.",
   "min_app_version": "1.2.45",
@@ -24,6 +24,12 @@
         "id": "codex",
         "label": "Codex",
         "order": 100
+      }
+    ],
+    "ide.hookups": [
+      {
+        "kind": "codex",
+        "label": "Codex"
       }
     ],
     "settings.sections": [
@@ -69,6 +75,20 @@
           "title": "Test & Save",
           "body": "Press Test & Save after you paste a key. Using Codex without a key? Press Skip.",
           "advance": "require_click",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.ide",
+          "title": "IDE / MCP connection",
+          "body": "IDE / MCP wires UEFN tools and Ducky skills into Codex globally (every project). Apply once, then Test. Green check = up to date.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.ide.apply",
+          "title": "Apply connection",
+          "body": "Press Apply (or Re-apply) so UEFN MCP and Ducky skills land in Codex. Then Test — a green check means connected.",
+          "advance": "next",
           "mode": "rect"
         },
         {
