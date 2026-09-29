@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from cli_update import (
+    hidden_run_kwargs,
+    npm_argv,
     is_cli_broken_binary_error,
     is_cli_missing_error,
     is_cli_too_old_error,
@@ -52,6 +55,21 @@ def test_skips_npm_shim_for_standalone(tmp_path, monkeypatch):
     assert not is_node_codex_wrapper(str(exe))
     assert native_codex_candidates()[0] == str(exe.resolve())
     assert resolve_bin() == str(exe.resolve())
+
+
+def test_npm_argv_skips_cmd(tmp_path, monkeypatch):
+    node = tmp_path / "node.exe"
+    node.write_bytes(b"")
+    cli = tmp_path / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("", encoding="utf-8")
+    npm = tmp_path / "npm.cmd"
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr("cli_update.shutil.which", lambda _name: None)
+    argv = npm_argv(str(npm), ["install", "-g", "@openai/codex"])
+    assert argv[:2] == [str(node), str(cli)]
+    if os.name == "nt":
+        assert hidden_run_kwargs().get("startupinfo") is not None
 
 
 def test_plugin_wires_auto_update():
