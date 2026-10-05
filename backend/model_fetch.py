@@ -311,6 +311,8 @@ def _openai_info_from_dashboard(
         id=model_id,
         display_name=str(alias or record.get("display_name") or model_id),
         supports_vision="image_content" in features,
+        max_images=_int_from_record(record, "max_images", "max_image_inputs"),
+        supports_audio=("audio" in features or "audio_input" in features) if features else None,
         supports_tools="function_calling" in features,
         supports_web_search="web_search" in features,
         context_limit=_context_from_record(record) or docs.get("context_limit"),
