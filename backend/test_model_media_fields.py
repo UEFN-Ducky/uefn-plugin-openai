@@ -61,8 +61,8 @@ def test_audio_and_max_images_from_record():
     assert _info(features=["image_content"], max_image_inputs=4).max_images == 4
 
 
-def test_audio_false_when_features_known_without_audio():
-    assert _info(features=["function_calling"]).supports_audio is False
+def test_audio_unknown_when_features_lack_audio():
+    assert _info(features=["function_calling"]).supports_audio is None
 
 
 def test_media_fields_unknown_when_absent():
