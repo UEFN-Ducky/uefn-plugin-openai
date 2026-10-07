@@ -506,7 +506,8 @@ def write_codex_uefn_profile(
         f"args = [{', '.join(_toml_quote(a) for a in args)}]",
         "enabled = true",
         "startup_timeout_sec = 60.0",
-        "tool_timeout_sec = 180.0",
+        # Codex needs a finite duration; Ducky questions themselves never expire.
+        "tool_timeout_sec = 1000000000000.0",
         _MCP_APPROVE_TOML,
     ]
     if env:

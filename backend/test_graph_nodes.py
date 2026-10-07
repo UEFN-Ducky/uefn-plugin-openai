@@ -13,7 +13,13 @@ def test_plugin_declares_nodes():
 
 
 def test_image_writes_png(tmp_path, monkeypatch):
-    from backend import graph_nodes
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "openai_graph_test", Path(__file__).with_name("graph_nodes.py")
+    )
+    graph_nodes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(graph_nodes)
 
     png = b"\x89PNG\r\n\x1a\n"
     monkeypatch.setattr(graph_nodes, "_images_http", lambda body, key: {"data": [{"b64_json": __import__("base64").b64encode(png).decode()}]})

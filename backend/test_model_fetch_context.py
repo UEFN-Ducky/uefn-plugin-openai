@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
+import types
 from pathlib import Path
 
 _here = Path(__file__).resolve().parent
@@ -16,11 +18,14 @@ for p in _here.parents:
         sys.path.insert(0, str(cand))
         break
 
-from model_fetch import (  # noqa: E402
-    _context_from_record,
-    _openai_info_from_dashboard,
-    parse_openai_docs_md,
-)
+# Load the plugin as a package while keeping the host's backend namespace.
+_package = types.ModuleType("openai_context_test")
+_package.__path__ = [str(_here)]
+sys.modules[_package.__name__] = _package
+_model_fetch = importlib.import_module("openai_context_test.model_fetch")
+_context_from_record = _model_fetch._context_from_record
+_openai_info_from_dashboard = _model_fetch._openai_info_from_dashboard
+parse_openai_docs_md = _model_fetch.parse_openai_docs_md
 
 
 ASTRA_MD = """

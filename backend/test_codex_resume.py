@@ -261,6 +261,7 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert 'default_tools_approval_mode = "auto"' not in text
     assert r"C:\\Ducky\\UEFN-Ducky.exe" in text
     assert "DUCKY_CONV_ID" in text
+    assert "tool_timeout_sec = 1000000000000.0" in text
     cfg = (home / "config.toml").read_text(encoding="utf-8")
     assert "node_repl" in cfg
     assert "BEGIN UEFN-DUCKY" in cfg
