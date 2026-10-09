@@ -18,6 +18,7 @@ from backend.agent.coding_agents.base import (
     CodingAgentCapabilities,
     CodingAgentInfo,
     CodingAgentLaunchResult,
+    normalize_coding_mode,
 )
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
 from backend.agent.coding_agents.proc_exec import run_streaming_process
@@ -254,8 +255,14 @@ _DUCKY_TOOLS_HINT = (
 )
 
 
-def ducky_launch_flags() -> list[str]:
+def ducky_launch_flags(mode: str = "agent") -> list[str]:
     """Approval, MCP and readiness flags for every Ducky-launched Codex turn (exec and resume)."""
+    if normalize_coding_mode(mode) != "agent":
+        # MCP approval is separate from native shell sandboxing. This does not
+        # provide the MCP mutation boundary or imply read-only MCP access.
+        # Saved execpolicy allow rules can run commands outside the sandbox.
+        # Unsupported CLIs must fail on this option, never retry without it.
+        return ["--ignore-rules", "-c", 'approval_policy="never"'] + list(_MCP_APPROVE_FLAG) + list(_MCP_REQUIRED_FLAG)
     return list(_APPROVAL_FLAG) + list(_MCP_APPROVE_FLAG) + list(_MCP_REQUIRED_FLAG) + list(_BYPASS_APPROVALS)
 
 
@@ -583,21 +590,46 @@ def build_codex_argv(
     image_paths: list[str] | None = None,
     extra_flags: list[str] | None = None,
     reasoning_effort: str = "",
+    mode: str = "agent",
 ) -> list[str]:
     """Argv for one `codex exec --json` turn; resumes ``session_id`` when set."""
+    mode = normalize_coding_mode(mode)
+    if mode != "agent" and session_id.startswith("-"):
+        # A positional resume id must not become a nested-parser bypass option.
+        raise ValueError("Codex restricted mode requires a positional session id")
     argv = [binary, "exec"]
+    if mode != "agent":
+        # Put the native option on the parent parser: exec resume has no -s.
+        # Unlike a config-only default, this explicitly selects the sandbox
+        # on this invocation, including when resuming a previously writable turn.
+        argv.extend(["--sandbox", "read-only"])
     if session_id:
         argv.extend(["resume", session_id])
     argv.extend(["--skip-git-repo-check", "--json"])
     for path in image_paths or []:
         # Codex exec natively attaches images to the initial prompt.
         argv.extend(["--image", path])
-    extra = _sandbox_cli_to_config(_normalize_codex_extra_args(extra_args))
-    flags = _sandbox_cli_to_config(list(extra_flags or []))
-    if session_id:
-        extra = _strip_exec_only(extra)
-        flags = _strip_exec_only(flags)
-    argv.extend(_one_approval_mode(extra + flags))
+    if mode == "agent":
+        extra = _sandbox_cli_to_config(_normalize_codex_extra_args(extra_args))
+        flags = _sandbox_cli_to_config(list(extra_flags or []))
+        if session_id:
+            extra = _strip_exec_only(extra)
+            flags = _strip_exec_only(flags)
+        argv.extend(_one_approval_mode(extra + flags))
+    else:
+        # The saved default --full-auto is superseded by the selected mode.
+        # Reject arbitrary flags/config/profiles rather than trying to blacklist
+        # every CLI alias, attached value, future option or config precedence.
+        try:
+            parts = shlex.split(extra_args or "", posix=False)
+        except ValueError:
+            raise ValueError("Codex restricted mode does not support these extra arguments") from None
+        if any(part != "--full-auto" for part in parts):
+            raise ValueError("Codex restricted mode does not support these extra arguments")
+        required = ducky_launch_flags(mode)
+        if extra_flags and list(extra_flags) != required:
+            raise ValueError("Codex restricted mode does not support these extra flags")
+        argv.extend(required)
     if not _is_codex_auto_model(model):
         argv.extend(["-m", model])
     effort = (reasoning_effort or "").strip().lower()
@@ -1005,6 +1037,7 @@ class CodexAdapter:
         needs_api_key=False,
         needs_cli=True,
         resume=True,
+        supported_modes=("ask", "plan", "agent"),
     )
 
     def detect(self, settings: Any) -> CodingAgentInfo:
@@ -1057,7 +1090,38 @@ class CodexAdapter:
         cancel: threading.Event | None = None,
         timeout_s: float = 0.0,
         image_paths: list[str] | None = None,
+        mode: str = "agent",
     ) -> CodingAgentLaunchResult:
+        try:
+            mode = normalize_coding_mode(mode)
+            # Validate before profile writes, CLI resolution or auto-install.
+            if mode != "agent":
+                build_codex_argv(binary="codex", prompt="", model="auto",
+                                 extra_args=extra_args, session_id=session_id, mode=mode)
+        except ValueError:
+            return CodingAgentLaunchResult(
+                ok=False, status="error", upstream_session_id=session_id,
+                requested_mode=str(mode), effective_mode="",
+                error="Codex mode or extra arguments are unsupported for a restricted launch.",
+            )
+        original_push = push
+
+        def push(event: dict[str, Any]) -> None:
+            original_push({**event, "requested_mode": mode, "effective_mode": ""})
+
+        def with_mode(result: CodingAgentLaunchResult) -> CodingAgentLaunchResult:
+            result.requested_mode = mode
+            # The shared finalizer permits a partial reply with nonzero exit.
+            # Restricted modes cannot use that reply to confirm a valid launch.
+            if mode != "agent" and result.ok and proc.returncode != 0:
+                result.ok = False
+                result.status = "error"
+                result.error = "Codex exited unsuccessfully; restricted mode was not confirmed."
+            # A failed/unsupported CLI invocation never confirms enforcement.
+            # Success confirms configured native sandbox, not MCP permissions.
+            result.effective_mode = mode if result.ok else ""
+            return result
+
         model_id = normalize_codex_model(model)
         from .cli_update import resolve_bin, should_heal_launch, update_cli
 
@@ -1076,6 +1140,7 @@ class CodexAdapter:
                 ),
                 status="error",
                 upstream_session_id=session_id,
+                requested_mode=mode,
             )
 
         binary = resolve_bin(cli_path)
@@ -1095,6 +1160,7 @@ class CodexAdapter:
                     ok=False,
                     error=str(upd.get("error") or "Codex CLI not found and auto-install failed"),
                     status="error",
+                    requested_mode=mode,
                 )
         full_prompt = prompt
         # System context only on the first turn; the resumed thread keeps it.
@@ -1111,7 +1177,7 @@ class CodexAdapter:
         if len(full_prompt) > inline_prompt_limit(binary):
             prompt_file = write_prompt_file(full_prompt, conv_id=conv_id)
             launch_prompt = prompt_file_instruction(prompt_file)
-        extra_flags: list[str] = ducky_launch_flags()
+        extra_flags: list[str] = ducky_launch_flags(mode)
         extra_dirs: list[Path] = []
         if prompt_file is not None:
             extra_dirs.append(Path(prompt_file).parent)
@@ -1119,7 +1185,8 @@ class CodexAdapter:
         if skills.is_dir():
             extra_dirs.append(skills)
         extra_dirs.extend(codex_extra_dirs(cwd))
-        extra_flags.extend(_writable_roots_flag(extra_dirs))
+        if mode == "agent":
+            extra_flags.extend(_writable_roots_flag(extra_dirs))
         try:
             from backend.agent.thinking_effort import normalize_thinking_effort
 
@@ -1133,6 +1200,7 @@ class CodexAdapter:
                 image_paths=list(image_paths or []),
                 extra_flags=extra_flags,
                 reasoning_effort=effort,
+                mode=mode,
             )
             state = _CodexStream(conv_id, run_id, push)
             if session_id:
@@ -1179,7 +1247,7 @@ class CodexAdapter:
                 proc.raw_tail,
                 state.error_text,
             ):
-                return result
+                return with_mode(result)
             push(
                 {
                     "type": "status",
@@ -1195,7 +1263,7 @@ class CodexAdapter:
                     + "\n\nDucky tried to update Codex automatically and failed: "
                     + str(upd.get("error") or "unknown")
                 )
-                return result
+                return with_mode(result)
             binary = resolve_bin(cli_path) or str(upd.get("cli_path") or binary)
             argv[0] = binary
             state = _CodexStream(conv_id, run_id, push)
@@ -1213,7 +1281,7 @@ class CodexAdapter:
             streamed_all = "".join(state.text_parts).strip()
             reply = state.trailing_text() or ("" if blocks else streamed_all)
             new_session = state.session_id or session_id
-            return finalize_cli_turn(
+            return with_mode(finalize_cli_turn(
                 proc=proc,
                 reply=reply,
                 streamed=bool(streamed_all) or bool(blocks),
@@ -1225,7 +1293,7 @@ class CodexAdapter:
                 timeout_s=timeout_s,
                 error_text=state.error_text,
                 stale_session_markers=("resume", "not found"),
-            )
+            ))
         finally:
             if prompt_file is not None:
                 try:
