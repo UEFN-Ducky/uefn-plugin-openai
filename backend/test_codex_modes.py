@@ -5,12 +5,130 @@ import importlib
 import inspect
 import json
 import sys
+import threading
 import types
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+
+
+@pytest.mark.parametrize("mode", ["ask", "plan", "agent"])
+@pytest.mark.parametrize("session", ["", "thread-one"])
+@pytest.mark.parametrize("ending", ["cancelled", "timeout"])
+@pytest.mark.parametrize("channel", ["stderr_tail", "raw_tail"])
+def test_terminal_repair_marker_never_replays(launch_env, monkeypatch, mode, session, ending, channel):
+    module, updater, kwargs, calls, events = launch_env
+    run = module.run_streaming_process.side_effect
+    def terminal(**kw):
+        kw["on_line"](json.dumps({"type": "item.completed", "item": {
+            "id": "inspect", "type": "command_execution", "command": "read fixture",
+            "aggregated_output": "Partial inspection", "exit_code": 0,
+        }}))
+        proc = run(**kw)  # Preserve partial reply and the upstream session.
+        proc.returncode = 1
+        proc.cancelled = ending == "cancelled"
+        proc.timed_out = ending == "timeout"
+        setattr(proc, channel, "no such file or directory")
+        return proc
+    module.run_streaming_process.side_effect = terminal
+    classifier = Mock(wraps=updater.should_heal_launch)
+    monkeypatch.setattr(updater, "should_heal_launch", classifier)
+    updater.update_cli.side_effect = None
+    updater.update_cli.return_value = {"ok": True}
+    result = module.CodexAdapter().launch(**kwargs, mode=mode, session_id=session)
+    assert (updater.update_cli.call_count, module.run_streaming_process.call_count) == (0, 1)
+    classifier.assert_not_called()
+    assert not result.ok and result.status == ending
+    assert result.reply_text == "Done" and result.blocks
+    assert result.upstream_session_id == "thread-one"
+    assert result.requested_mode == mode and result.effective_mode == ""
+    assert not any("updating automatically" in e.get("text", "") for e in events)
+
+
+@pytest.mark.parametrize("mode", ["ask", "plan", "agent"])
+@pytest.mark.parametrize("session", ["", "thread-one"])
+def test_real_nonterminal_repair_classifier_retains_flags(launch_env, mode, session):
+    module, updater, kwargs, calls, events = launch_env
+    run = module.run_streaming_process.side_effect
+    first = types.SimpleNamespace(cancelled=False, timed_out=False, returncode=1,
+                                  stderr_tail="no such file or directory", raw_tail="")
+    attempts = []
+    def process(**kw):
+        attempts.append(kw["argv"].copy())
+        return first if len(attempts) == 1 else run(**kw)
+    module.run_streaming_process.side_effect = process
+    updater.update_cli.side_effect = None
+    updater.update_cli.return_value = {"ok": True}
+    result = module.CodexAdapter().launch(**kwargs, mode=mode, session_id=session)
+    assert result.ok and result.effective_mode == mode
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    updater.update_cli.assert_called_once()
+    for argv in attempts:
+        assert_mode_argv(argv, mode, session)
+
+
+@pytest.mark.parametrize("boundary", ["process", "classifier", "status", "updater"])
+def test_cancellation_arriving_at_retry_boundary(launch_env, monkeypatch, boundary):
+    module, updater, kwargs, calls, events = launch_env
+    cancel = threading.Event()
+    def process(**kw):
+        if boundary == "process":
+            cancel.set()
+        return types.SimpleNamespace(cancelled=False, timed_out=False, returncode=1,
+                                     stderr_tail="no such file or directory", raw_tail="")
+    module.run_streaming_process.side_effect = process
+    real_classifier = updater.should_heal_launch
+    def classifier(*chunks):
+        if boundary == "classifier":
+            cancel.set()
+        return real_classifier(*chunks)
+    monkeypatch.setattr(updater, "should_heal_launch", classifier)
+    def update(*args):
+        if boundary == "updater":
+            cancel.set()
+        return {"ok": True}
+    updater.update_cli.side_effect = update
+    def push(event):
+        events.append(event)
+        if boundary == "status" and "updating automatically" in event.get("text", ""):
+            cancel.set()
+    kwargs["push"] = push
+    result = module.CodexAdapter().launch(**kwargs, mode="plan", session_id="thread-one", cancel=cancel)
+    assert module.run_streaming_process.call_count == 1
+    assert updater.update_cli.call_count == (1 if boundary == "updater" else 0)
+    assert not result.ok and result.status == "error"  # Original finalized result.
+    assert result.upstream_session_id == "thread-one"
+    assert result.requested_mode == "plan" and result.effective_mode == ""
+
+
+@pytest.mark.parametrize("session", ["", "thread-one"])
+@pytest.mark.parametrize("ending", ["cancelled", "timeout"])
+def test_historical_host_terminal_result_never_replays(launch_env, monkeypatch, session, ending):
+    with registered_profile(launch_env, monkeypatch, "legacy") as (module, agent, kw, calls, events, base):
+        run = module.run_streaming_process.side_effect
+        def terminal(**kwargs):
+            kwargs["on_line"](json.dumps({"type": "item.completed", "item": {
+                "id": "inspect", "type": "command_execution", "command": "read fixture",
+                "aggregated_output": "Partial inspection", "exit_code": 0,
+            }}))
+            proc = run(**kwargs)
+            proc.cancelled = ending == "cancelled"
+            proc.timed_out = ending == "timeout"
+            proc.returncode = 1
+            proc.raw_tail = "no such file or directory"
+            return proc
+        module.run_streaming_process.side_effect = terminal
+        updater = importlib.import_module(module.__package__ + ".cli_update")
+        updater.update_cli.side_effect = None
+        updater.update_cli.return_value = {"ok": True}
+        result = agent.launch(**kw, session_id=session)
+        assert (updater.update_cli.call_count, module.run_streaming_process.call_count) == (0, 1)
+        assert isinstance(result, base.CodingAgentLaunchResult)
+        assert not result.ok and result.status == ending
+        assert result.reply_text == "Done" and result.blocks
+        assert result.upstream_session_id == "thread-one"
 
 
 @contextmanager

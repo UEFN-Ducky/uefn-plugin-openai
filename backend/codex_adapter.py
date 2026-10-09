@@ -1277,6 +1277,15 @@ class CodexAdapter:
                 error_text=state.error_text,
                 stale_session_markers=("resume", "not found"),
             )
+            def retry_stopped() -> bool:
+                # Terminal output can also contain repair markers. Never replay
+                # uncertain work, or begin repair after observing cancellation.
+                return (proc.cancelled or proc.timed_out
+                        or result.status in ("cancelled", "timeout")
+                        or (cancel is not None and cancel.is_set()))
+
+            if retry_stopped():
+                return with_mode(result)
             if result.ok or not should_heal_launch(
                 result.error or "",
                 result.reply_text or "",
@@ -1284,6 +1293,8 @@ class CodexAdapter:
                 proc.raw_tail,
                 state.error_text,
             ):
+                return with_mode(result)
+            if retry_stopped():
                 return with_mode(result)
             push(
                 {
@@ -1293,7 +1304,11 @@ class CodexAdapter:
                     "run_id": run_id,
                 }
             )
+            if retry_stopped():
+                return with_mode(result)
             upd = update_cli(binary)
+            if retry_stopped():
+                return with_mode(result)
             if not upd.get("ok"):
                 result.error = (
                     (result.error or "")
@@ -1304,6 +1319,8 @@ class CodexAdapter:
             binary = resolve_bin(cli_path) or str(upd.get("cli_path") or binary)
             argv[0] = binary
             state = _CodexStream(conv_id, run_id, push)
+            if retry_stopped():
+                return with_mode(result)
             proc = run_streaming_process(
                 argv=argv,
                 cwd=cwd,
