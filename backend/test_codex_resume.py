@@ -21,9 +21,11 @@ from codex_adapter import (
     _writable_roots_flag,
     build_codex_argv,
     codex_extra_dirs,
+    ducky_launch_flags,
     heal_codex_approval_policy,
     normalize_codex_model,
     parse_codex_catalog,
+    with_ducky_tools_hint,
     write_codex_uefn_profile,
 )
 
@@ -311,6 +313,32 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert "-p=ducky-uefn" not in glued
     assert "--profile=ducky-uefn" not in glued
     assert write_codex_uefn_profile("", codex_home=home) == ""
+
+
+def test_ducky_mcp_is_required_on_new_and_resumed_turns_but_not_in_shared_config(tmp_path: Path):
+    # Codex waits only 1 s for optional MCP servers; Ducky's bridge needs longer.
+    for session_id in ("", "th-abc"):
+        argv = build_codex_argv(
+            binary="codex",
+            prompt="hi",
+            model="gpt-5",
+            extra_args="",
+            session_id=session_id,
+            extra_flags=ducky_launch_flags(),
+        )
+        assert "mcp_servers.uefn.required=true" in argv, session_id
+        assert 'mcp_servers.uefn.default_tools_approval_mode="approve"' in argv
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(json.dumps({"mcpServers": {"uefn": {"command": "node", "args": ["b.mjs"]}}}), encoding="utf-8")
+    home = tmp_path / "codex"
+    write_codex_uefn_profile(str(mcp), codex_home=home)
+    # The user's own Codex sessions read config.toml too: they must not fail when Ducky is closed.
+    assert "required" not in (home / "config.toml").read_text(encoding="utf-8")
+
+
+def test_every_turn_says_where_ducky_tools_are():
+    text = with_ducky_tools_hint("Continue.")
+    assert "tools.mcp__uefn__" in text and text.endswith("Continue.")
 
 
 def test_write_strips_unmarked_uefn_duplicate(tmp_path: Path):

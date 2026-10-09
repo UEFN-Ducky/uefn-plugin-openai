@@ -237,6 +237,31 @@ _MCP_APPROVE_FLAG = ["-c", 'mcp_servers.uefn.default_tools_approval_mode="approv
 # openai/codex#24135: exec ignores default_tools_approval_mode and rejects MCP
 # with "approval policy is never". This flag is on `exec` and `exec resume`.
 _BYPASS_APPROVALS = ["--dangerously-bypass-approvals-and-sandbox"]
+# Codex builds the turn's tool list after waiting only 1 s for optional MCP servers
+# (mcp_optional_startup_grace_ms), and Ducky's bridge takes seconds to start, so
+# every launch came up with no Ducky tools. Required = wait (startup_timeout_sec)
+# and fail the turn loudly if Ducky can't start. Only on Ducky's own launches: the
+# shared config.toml also serves the user's own Codex sessions.
+_MCP_REQUIRED_FLAG = ["-c", "mcp_servers.uefn.required=true"]
+# Codex code mode (0.160+) doesn't list MCP tools at the top level: they live in the
+# exec tool, so agents looked at their tool list, saw no Ducky tools and stopped.
+_DUCKY_TOOLS_HINT = (
+    "Ducky's tools (MCP server 'uefn') may not be in your top-level tool list. If they "
+    "aren't, they are inside your exec tool: call them as "
+    "`await tools.mcp__uefn__<tool_name>({...})` (e.g. tools.mcp__uefn__ducky_get_plan) "
+    "and list them with Object.keys(tools). Never conclude Ducky tools are missing "
+    "without checking there."
+)
+
+
+def ducky_launch_flags() -> list[str]:
+    """Approval, MCP and readiness flags for every Ducky-launched Codex turn (exec and resume)."""
+    return list(_APPROVAL_FLAG) + list(_MCP_APPROVE_FLAG) + list(_MCP_REQUIRED_FLAG) + list(_BYPASS_APPROVALS)
+
+
+def with_ducky_tools_hint(prompt: str) -> str:
+    """Every turn, resumed ones too (they never see the first turn's system text again)."""
+    return _DUCKY_TOOLS_HINT + "\n\n" + prompt
 # `codex exec resume` is a smaller clap parser than `codex exec`.
 _EXEC_ONLY_VALUE = {
     "-p",
@@ -1041,6 +1066,7 @@ class CodexAdapter:
         # System context only on the first turn; the resumed thread keeps it.
         if system_prompt.strip() and not session_id:
             full_prompt = system_prompt.strip() + "\n\n" + prompt
+        full_prompt = with_ducky_tools_hint(full_prompt)
 
         # Windows CreateProcess dies with WinError 206 when argv is huge.
         # Keep the CLI arg short; put the real brief in a temp file.
@@ -1054,9 +1080,7 @@ class CodexAdapter:
                 "Open this UTF-8 file and follow every instruction in it exactly "
                 f"(do not summarize first): {prompt_file}"
             )
-        extra_flags: list[str] = (
-            list(_APPROVAL_FLAG) + list(_MCP_APPROVE_FLAG) + list(_BYPASS_APPROVALS)
-        )
+        extra_flags: list[str] = ducky_launch_flags()
         write_codex_uefn_profile(mcp_config_path)
         extra_dirs: list[Path] = []
         if prompt_file is not None:
