@@ -262,6 +262,23 @@ def ducky_launch_flags() -> list[str]:
 def with_ducky_tools_hint(prompt: str) -> str:
     """Every turn, resumed ones too (they never see the first turn's system text again)."""
     return _DUCKY_TOOLS_HINT + "\n\n" + prompt
+
+
+def inline_prompt_limit(binary: str) -> int:
+    """Longest prompt that goes straight on the command line. CreateProcess takes 32,767
+    characters and the rest of Codex's argv stays far below 8K; a .cmd/.bat shim runs
+    through cmd.exe, which stops at 8,191. Inline keeps a normal message out of a file the
+    agent would first have to open (it tried Ducky's workspace tools, which refuse AppData)."""
+    return 2500 if Path(binary or "").suffix.lower() in (".cmd", ".bat") else 16000
+
+
+def prompt_file_instruction(path: object) -> str:
+    """The launch message when the brief is in a temp file: read it with the shell."""
+    return (
+        "Your instructions for this turn are in a UTF-8 file. Read it with your own shell first "
+        f"(PowerShell: Get-Content -Raw -Encoding UTF8 -LiteralPath '{path}'); Ducky's workspace "
+        "tools cannot open it. Then follow every instruction in it exactly (do not summarize first)."
+    )
 # `codex exec resume` is a smaller clap parser than `codex exec`.
 _EXEC_ONLY_VALUE = {
     "-p",
@@ -1068,18 +1085,15 @@ class CodexAdapter:
             full_prompt = system_prompt.strip() + "\n\n" + prompt
         full_prompt = with_ducky_tools_hint(full_prompt)
 
-        # Windows CreateProcess dies with WinError 206 when argv is huge.
-        # Keep the CLI arg short; put the real brief in a temp file.
+        # Windows CreateProcess dies with WinError 206 when argv is huge: a long brief
+        # goes in a temp file the agent reads first.
         from backend.agent.coding_agents.mcp_inject import write_prompt_file
 
         prompt_file = None
         launch_prompt = full_prompt
-        if len(full_prompt) > 2500:
+        if len(full_prompt) > inline_prompt_limit(binary):
             prompt_file = write_prompt_file(full_prompt, conv_id=conv_id)
-            launch_prompt = (
-                "Open this UTF-8 file and follow every instruction in it exactly "
-                f"(do not summarize first): {prompt_file}"
-            )
+            launch_prompt = prompt_file_instruction(prompt_file)
         extra_flags: list[str] = ducky_launch_flags()
         write_codex_uefn_profile(mcp_config_path)
         extra_dirs: list[Path] = []
