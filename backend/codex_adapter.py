@@ -1061,6 +1061,17 @@ class CodexAdapter:
         model_id = normalize_codex_model(model)
         from .cli_update import resolve_bin, should_heal_launch, update_cli
 
+        if not write_codex_uefn_profile(mcp_config_path):
+            return CodingAgentLaunchResult(
+                ok=False,
+                error=(
+                    "Ducky tools unavailable: could not write the Codex UEFN MCP profile. "
+                    "Check the Ducky MCP configuration and Codex config directory permissions."
+                ),
+                status="error",
+                upstream_session_id=session_id,
+            )
+
         binary = resolve_bin(cli_path)
         if not binary:
             push(
@@ -1095,7 +1106,6 @@ class CodexAdapter:
             prompt_file = write_prompt_file(full_prompt, conv_id=conv_id)
             launch_prompt = prompt_file_instruction(prompt_file)
         extra_flags: list[str] = ducky_launch_flags()
-        write_codex_uefn_profile(mcp_config_path)
         extra_dirs: list[Path] = []
         if prompt_file is not None:
             extra_dirs.append(Path(prompt_file).parent)
