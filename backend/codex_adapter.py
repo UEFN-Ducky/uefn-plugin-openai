@@ -1061,7 +1061,13 @@ class CodexAdapter:
         model_id = normalize_codex_model(model)
         from .cli_update import resolve_bin, should_heal_launch, update_cli
 
-        if not write_codex_uefn_profile(mcp_config_path):
+        try:
+            profile_ready = write_codex_uefn_profile(mcp_config_path)
+        except Exception:
+            # Config errors may contain secrets; keep the launch error fixed.
+            # BaseException control flow (including cancellation) must propagate.
+            profile_ready = ""
+        if not profile_ready:
             return CodingAgentLaunchResult(
                 ok=False,
                 error=(

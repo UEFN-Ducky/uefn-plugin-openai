@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -38,7 +39,8 @@ def launch_env(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, package_name, package)
     adapter = importlib.import_module(f"{package_name}.codex_adapter")
     updater = importlib.import_module(f"{package_name}.cli_update")
-    monkeypatch.setattr(updater, "resolve_bin", lambda _: "codex.exe")
+    resolve = Mock(return_value="codex.exe")
+    monkeypatch.setattr(updater, "resolve_bin", resolve)
     update = Mock(side_effect=AssertionError("Readiness must not trigger CLI installation"))
     monkeypatch.setattr(updater, "update_cli", update)
     monkeypatch.setattr(adapter, "codex_extra_dirs", lambda _: [])
@@ -55,7 +57,7 @@ def launch_env(tmp_path, monkeypatch):
         mcp_config_path=str(config), extra_args="", cli_path="codex.exe",
         env={}, push=events.append,
     )
-    yield adapter, process, update, config, events, kwargs
+    yield adapter, process, update, config, events, kwargs, resolve
     for name in list(sys.modules):
         if name.startswith(package_name + "."):
             del sys.modules[name]
@@ -65,9 +67,13 @@ def launch_env(tmp_path, monkeypatch):
 @pytest.mark.parametrize("failure", [
     "empty_path", "missing_file", "invalid_json", "missing_server",
     "missing_command", "blocked_directory", "blocked_config",
+    "invalid_encoding", "invalid_args", "writer_oserror", "writer_runtimeerror",
 ])
-def test_ducky_readiness_failed_profile_never_launches(launch_env, tmp_path, session_id, failure):
-    adapter, process, update, config, events, kwargs = launch_env
+def test_ducky_readiness_failed_profile_never_launches(
+    launch_env, tmp_path, monkeypatch, capsys, caplog, session_id, failure,
+):
+    adapter, process, update, config, events, kwargs, resolve = launch_env
+    sensitive_marker = "SYNTHETIC_PRIVATE_CONFIG_CONTENT"
     if failure == "empty_path":
         kwargs["mcp_config_path"] = ""
     elif failure == "missing_file":
@@ -82,6 +88,17 @@ def test_ducky_readiness_failed_profile_never_launches(launch_env, tmp_path, ses
         (tmp_path / ".codex").write_text("not a directory", encoding="utf-8")
     elif failure == "blocked_config":
         (tmp_path / ".codex" / "config.toml").mkdir(parents=True)
+    elif failure == "invalid_encoding":
+        config.write_bytes(b"\xff\xfe\x80")
+    elif failure == "invalid_args":
+        config.write_text(json.dumps({"mcpServers": {"uefn": {
+            "command": "node", "args": 7, "env": {"TEST_VALUE": sensitive_marker},
+        }}}), encoding="utf-8")
+    elif failure in ("writer_oserror", "writer_runtimeerror"):
+        error_type = OSError if failure == "writer_oserror" else RuntimeError
+        monkeypatch.setattr(adapter, "write_codex_uefn_profile", Mock(
+            side_effect=error_type(sensitive_marker),
+        ))
     process.side_effect = AssertionError("Agent launched without a written MCP profile")
 
     result = adapter.CodexAdapter().launch(**kwargs, session_id=session_id)
@@ -91,15 +108,37 @@ def test_ducky_readiness_failed_profile_never_launches(launch_env, tmp_path, ses
     assert result.error.startswith("Ducky tools unavailable: ")
     assert "profile" in result.error.lower()
     assert result.upstream_session_id == session_id
+    resolve.assert_not_called()
     process.assert_not_called()
     update.assert_not_called()
-    assert not any("Starting Codex" in event.get("text", "") for event in events)
+    assert not events
+    captured = capsys.readouterr()
+    assert sensitive_marker not in repr(result) + captured.out + captured.err + caplog.text
+
+
+@pytest.mark.parametrize("session_id", ["", "existing-thread"])
+@pytest.mark.parametrize("error_type", [
+    KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError,
+])
+def test_ducky_readiness_control_flow_propagates(launch_env, monkeypatch, session_id, error_type):
+    adapter, process, update, config, events, kwargs, resolve = launch_env
+    error = error_type()
+    monkeypatch.setattr(adapter, "write_codex_uefn_profile", Mock(side_effect=error))
+
+    with pytest.raises(error_type) as raised:
+        adapter.CodexAdapter().launch(**kwargs, session_id=session_id)
+
+    assert raised.value is error
+    resolve.assert_not_called()
+    process.assert_not_called()
+    update.assert_not_called()
+    assert not events
 
 
 @pytest.mark.parametrize("session_id", ["", "existing-thread"])
 @pytest.mark.parametrize("mcp_failure", [False, True])
 def test_ducky_readiness_normal_launch_keeps_mcp_required(launch_env, tmp_path, session_id, mcp_failure):
-    adapter, process, update, config, events, kwargs = launch_env
+    adapter, process, update, config, events, kwargs, resolve = launch_env
 
     def run(**call):
         # The profile is written before the process can be created.
