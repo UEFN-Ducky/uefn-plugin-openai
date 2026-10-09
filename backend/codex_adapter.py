@@ -6,6 +6,7 @@ id this adapter returns and passes it back on the next turn.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shlex
@@ -14,15 +15,42 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.agent.coding_agents import base as _coding_base
 from backend.agent.coding_agents.base import (
     CodingAgentCapabilities,
     CodingAgentInfo,
     CodingAgentLaunchResult,
-    normalize_coding_mode,
 )
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
 from backend.agent.coding_agents.proc_exec import run_streaming_process
 from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
+
+
+def _legacy_normalize_mode(mode: str | None = "agent") -> str:
+    if mode is None or mode == "":
+        return "agent"
+    if isinstance(mode, str) and mode.strip().lower() in ("ask", "plan", "agent"):
+        return mode.strip().lower()
+    raise ValueError("Invalid coding-agent mode")
+
+
+# App 1.2.361 predates mode fields. Inspect the actual constructors; never retry
+# a failed constructor or hide an unrelated import/initialization error.
+normalize_coding_mode = getattr(_coding_base, "normalize_coding_mode", _legacy_normalize_mode)
+_CAPABILITY_PARAMETERS = inspect.signature(CodingAgentCapabilities).parameters
+_RESULT_PARAMETERS = inspect.signature(CodingAgentLaunchResult).parameters
+_HOST_MODE_CONTRACT = (
+    hasattr(_coding_base, "normalize_coding_mode")
+    and "supported_modes" in _CAPABILITY_PARAMETERS
+    and {"requested_mode", "effective_mode"} <= _RESULT_PARAMETERS.keys()
+)
+
+
+def _launch_result(**kwargs: Any) -> CodingAgentLaunchResult:
+    for key in ("requested_mode", "effective_mode"):
+        if key not in _RESULT_PARAMETERS:
+            kwargs.pop(key, None)
+    return CodingAgentLaunchResult(**kwargs)
 
 _CODEX_INSTALL_PS = r"irm https://chatgpt.com/codex/install.ps1 | iex"
 _CODEX_INSTALL_NPM = "npm install -g @openai/codex"
@@ -1037,7 +1065,8 @@ class CodexAdapter:
         needs_api_key=False,
         needs_cli=True,
         resume=True,
-        supported_modes=("ask", "plan", "agent"),
+        **({"supported_modes": ("ask", "plan", "agent") if _HOST_MODE_CONTRACT else ("agent",)}
+           if "supported_modes" in _CAPABILITY_PARAMETERS else {}),
     )
 
     def detect(self, settings: Any) -> CodingAgentInfo:
@@ -1096,10 +1125,16 @@ class CodexAdapter:
             mode = normalize_coding_mode(mode)
             # Validate before profile writes, CLI resolution or auto-install.
             if mode != "agent":
+                if not _HOST_MODE_CONTRACT:
+                    return _launch_result(
+                        ok=False, status="error", upstream_session_id=session_id,
+                        requested_mode=mode, effective_mode="",
+                        error="Codex Ask/Plan requires an app with the coding-agent mode contract.",
+                    )
                 build_codex_argv(binary="codex", prompt="", model="auto",
                                  extra_args=extra_args, session_id=session_id, mode=mode)
         except ValueError:
-            return CodingAgentLaunchResult(
+            return _launch_result(
                 ok=False, status="error", upstream_session_id=session_id,
                 requested_mode=str(mode), effective_mode="",
                 error="Codex mode or extra arguments are unsupported for a restricted launch.",
@@ -1110,7 +1145,8 @@ class CodexAdapter:
             original_push({**event, "requested_mode": mode, "effective_mode": ""})
 
         def with_mode(result: CodingAgentLaunchResult) -> CodingAgentLaunchResult:
-            result.requested_mode = mode
+            if "requested_mode" in _RESULT_PARAMETERS:
+                result.requested_mode = mode
             # The shared finalizer permits a partial reply with nonzero exit.
             # Restricted modes cannot use that reply to confirm a valid launch.
             if mode != "agent" and result.ok and proc.returncode != 0:
@@ -1119,7 +1155,8 @@ class CodexAdapter:
                 result.error = "Codex exited unsuccessfully; restricted mode was not confirmed."
             # A failed/unsupported CLI invocation never confirms enforcement.
             # Success confirms configured native sandbox, not MCP permissions.
-            result.effective_mode = mode if result.ok else ""
+            if "effective_mode" in _RESULT_PARAMETERS:
+                result.effective_mode = mode if result.ok else ""
             return result
 
         model_id = normalize_codex_model(model)
@@ -1132,7 +1169,7 @@ class CodexAdapter:
             # BaseException control flow (including cancellation) must propagate.
             profile_ready = ""
         if not profile_ready:
-            return CodingAgentLaunchResult(
+            return _launch_result(
                 ok=False,
                 error=(
                     "Ducky tools unavailable: could not write the Codex UEFN MCP profile. "
@@ -1156,7 +1193,7 @@ class CodexAdapter:
             upd = update_cli(cli_path)
             binary = resolve_bin(cli_path) or str(upd.get("cli_path") or "")
             if not binary:
-                return CodingAgentLaunchResult(
+                return _launch_result(
                     ok=False,
                     error=str(upd.get("error") or "Codex CLI not found and auto-install failed"),
                     status="error",

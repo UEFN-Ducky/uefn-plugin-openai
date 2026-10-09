@@ -6,10 +6,132 @@ import inspect
 import json
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+
+
+@contextmanager
+def registered_profile(launch_env, monkeypatch, profile):
+    """Load the actual package entrypoint through the host, with an old API."""
+    adapter, updater, kwargs, calls, events = launch_env
+    from backend.agent.coding_agents import base, cli_shared
+    from backend.uefn_plugins import host
+
+    before = dict(sys.modules)
+    try:
+        with monkeypatch.context() as patch:
+            legacy = types.ModuleType("_codex_legacy_base")
+            patch.setitem(sys.modules, legacy.__name__, legacy)
+            exec("from dataclasses import dataclass, field\nfrom typing import Any\n" +
+                 _LEGACY_BASE_CLASSES, legacy.__dict__)
+            if profile in ("legacy", "missing_helper"):
+                patch.delattr(base, "normalize_coding_mode")
+            if profile in ("legacy", "old_capabilities"):
+                patch.setattr(base, "CodingAgentCapabilities", legacy.CodingAgentCapabilities)
+            if profile in ("legacy", "old_result"):
+                patch.setattr(base, "CodingAgentLaunchResult", legacy.CodingAgentLaunchResult)
+                patch.setattr(cli_shared, "CodingAgentLaunchResult", legacy.CodingAgentLaunchResult)
+            if profile == "legacy":
+                patch.setattr(base, "CodingAgentInfo", legacy.CodingAgentInfo)
+            package = host._import_backend("openai_compat_test", Path(__file__).parents[1], "backend")
+            loaded = importlib.import_module(package.__name__ + ".codex_adapter")
+            cli = importlib.import_module(package.__name__ + ".cli_update")
+            patch.setattr(loaded, "run_streaming_process", adapter.run_streaming_process)
+            patch.setattr(loaded, "codex_extra_dirs", lambda _: [])
+            patch.setattr(loaded, "heal_codex_approval_policy", Mock())
+            patch.setattr(cli, "schedule_cli_update_on_plugin_load", Mock())
+            patch.setattr(cli, "resolve_bin", updater.resolve_bin)
+            patch.setattr(cli, "update_cli", updater.update_cli)
+            patch.setattr(package, "_heal_default_model_if_codex_only", Mock())
+            api = Mock()
+            package.register(api)
+            assert api.register_coding_agent.call_args.args == ("codex",)
+            instance = api.register_coding_agent.call_args.kwargs["factory"]()
+            yield loaded, instance, kwargs, calls, events, base
+    finally:
+        # Remove all imports introduced by registration, restore previous entries.
+        for name in set(sys.modules) - set(before):
+            sys.modules.pop(name, None)
+        sys.modules.update(before)
+
+
+@pytest.mark.parametrize("profile", ["legacy", "missing_helper", "old_capabilities", "old_result", "current"])
+@pytest.mark.parametrize("session", ["", "thread-one"])
+def test_registered_host_profiles_agent(launch_env, monkeypatch, profile, session):
+    with registered_profile(launch_env, monkeypatch, profile) as (module, agent, kw, calls, events, base):
+        assert isinstance(agent.capabilities, base.CodingAgentCapabilities)
+        assert agent.capabilities.resume and agent.capabilities.mcp_inject
+        result = agent.launch(**kw, session_id=session)  # Old runner supplies no mode.
+        assert isinstance(result, base.CodingAgentLaunchResult)
+        assert result.ok and result.reply_text == "Done"
+        assert result.upstream_session_id == "thread-one"
+        assert_mode_argv(calls[0]["argv"], "agent", session)
+        if profile not in ("legacy", "old_result"):
+            assert result.requested_mode == result.effective_mode == "agent"
+            assert result.to_dict()["effective_mode"] == "agent"
+        else:
+            assert "effective_mode" not in result.to_dict()
+
+
+@pytest.mark.parametrize("profile", ["legacy", "missing_helper", "old_capabilities", "old_result"])
+@pytest.mark.parametrize("mode", ["ask", "plan", "invalid"])
+def test_incomplete_host_contract_refuses_restriction(launch_env, monkeypatch, profile, mode):
+    with registered_profile(launch_env, monkeypatch, profile) as (module, agent, kw, calls, events, base):
+        writer = Mock(side_effect=AssertionError("profile write"))
+        monkeypatch.setattr(module, "write_codex_uefn_profile", writer)
+        result = agent.launch(**kw, mode=mode, session_id="thread-one")
+        assert not result.ok and result.status == "error"
+        assert result.upstream_session_id == "thread-one"
+        if mode in ("ask", "plan"):
+            assert "requires an app" in result.error
+        assert getattr(agent.capabilities, "supported_modes", ("agent",)) == ("agent",)
+        assert not calls and not events
+        writer.assert_not_called()
+        launch_env[1].resolve_bin.assert_not_called()
+        launch_env[1].update_cli.assert_not_called()
+
+
+@pytest.mark.parametrize("session", ["", "thread-one"])
+def test_legacy_process_failure_preserves_result(launch_env, monkeypatch, session):
+    with registered_profile(launch_env, monkeypatch, "legacy") as (module, agent, kw, calls, events, base):
+        module.run_streaming_process.side_effect = None
+        module.run_streaming_process.return_value = types.SimpleNamespace(
+            cancelled=False, timed_out=False, returncode=1, stderr_tail="synthetic failure", raw_tail="")
+        result = agent.launch(**kw, session_id=session)
+        assert isinstance(result, base.CodingAgentLaunchResult)
+        assert not result.ok and result.status == "error"
+        assert result.upstream_session_id == session
+        module.run_streaming_process.assert_called_once()
+        launch_env[1].update_cli.assert_not_called()
+
+
+def test_unrelated_missing_base_import_is_not_hidden(launch_env, monkeypatch):
+    from backend.agent.coding_agents import base
+    monkeypatch.delattr(base, "CodingAgentInfo")
+    with pytest.raises(ImportError, match="CodingAgentInfo"):
+        with registered_profile(launch_env, monkeypatch, "missing_helper"):
+            pytest.fail("Broken mandatory import must fail")
+
+
+@pytest.mark.parametrize("profile", ["legacy", "missing_helper", "old_capabilities", "old_result"])
+@pytest.mark.parametrize("failure", ["config", "profile"])
+@pytest.mark.parametrize("session", ["", "thread-one"])
+def test_older_host_readiness_failure_retains_session(launch_env, monkeypatch, profile, failure, session):
+    with registered_profile(launch_env, monkeypatch, profile) as (module, agent, kw, calls, events, base):
+        if failure == "config":
+            Path(kw["mcp_config_path"]).write_text("not-json", encoding="utf-8")
+        else:
+            monkeypatch.setattr(module, "write_codex_uefn_profile", Mock(side_effect=OSError("PRIVATE")))
+        result = agent.launch(**kw, session_id=session)
+        assert isinstance(result, base.CodingAgentLaunchResult)
+        assert not result.ok and result.status == "error"
+        assert result.error.startswith("Ducky tools unavailable:") and "PRIVATE" not in result.error
+        assert result.upstream_session_id == session
+        assert not calls and not events
+        launch_env[1].resolve_bin.assert_not_called()
 
 
 @pytest.fixture
@@ -249,3 +371,68 @@ def test_resume_id_cannot_become_a_bypass_option(launch_env, mode):
     assert not result.ok and result.effective_mode == ""
     assert not calls and not events
     updater.resolve_bin.assert_not_called()
+
+
+# Frozen class definitions from app 1.2.361, f2094f09307472a19fdd1edf762065649aa734dc.
+# Taken from backend/agent/coding_agents/base.py, not inferred from the new API.
+_LEGACY_BASE_CLASSES = r'''
+@dataclass(frozen=True)
+class CodingAgentCapabilities:
+    terminal_agent: bool = False
+    chat_api: bool = False
+    a2a: bool = True
+    mcp_inject: bool = False
+    needs_api_key: bool = False
+    needs_cli: bool = False
+    resume: bool = False
+    'Plugin-owned: True if this adapter resumes an upstream session.\n\n    Core only stores the id the plugin returns and passes it back on\n    launch(). Vendor flags (--resume, Agent.resume, exec resume, …)\n    live in the plugin, not here.\n    '
+
+@dataclass
+class CodingAgentInfo:
+    id: str
+    label: str
+    enabled: bool
+    available: bool
+    status: str
+    cli_path: str = ''
+    default_args: str = ''
+    capabilities: CodingAgentCapabilities = field(default_factory=CodingAgentCapabilities)
+    models: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        install_help = ''
+        plugin_id = ''
+        shows_thinking = False
+        can_login = False
+        can_logout = False
+        try:
+            from backend.uefn_plugins.host import get_coding_agent_registration
+            reg = get_coding_agent_registration(self.id) or {}
+            install_help = str(reg.get('install_help') or '')
+            plugin_id = str(reg.get('plugin_id') or '')
+            shows_thinking = bool(reg.get('shows_thinking_effort') or callable(reg.get('thinking_env')))
+            can_login = callable(reg.get('login'))
+            can_logout = callable(reg.get('logout'))
+        except Exception:
+            pass
+        return {'id': self.id, 'label': self.label, 'enabled': self.enabled, 'available': self.available, 'status': self.status, 'cli_path': self.cli_path, 'default_args': self.default_args, 'install_help': install_help, 'shows_thinking_effort': shows_thinking, 'plugin_id': plugin_id, 'logged_in': getattr(self, 'logged_in', None), 'can_login': can_login, 'can_logout': can_logout, 'capabilities': {'terminal_agent': self.capabilities.terminal_agent, 'chat_api': self.capabilities.chat_api, 'a2a': self.capabilities.a2a, 'mcp_inject': self.capabilities.mcp_inject, 'needs_api_key': self.capabilities.needs_api_key, 'needs_cli': self.capabilities.needs_cli}, 'models': list(self.models)}
+
+@dataclass
+class CodingAgentLaunchResult:
+    ok: bool
+    terminal_session_id: str = ''
+    upstream_session_id: str = ''
+    output_tail: str = ''
+    reply_text: str = ''
+    error: str = ''
+    status: str = ''
+    streamed: bool = False
+    'True when the adapter already pushed text deltas live (no re-stream).'
+    usage: dict[str, Any] = field(default_factory=dict)
+    "Real usage from the CLI's result event: input/output/cache tokens,\n    cost_usd, num_turns, model, context_tokens (window used this turn)."
+    blocks: list[dict[str, Any]] = field(default_factory=list)
+    "Ordered thinking/text/tool_call blocks (embedded-agent format) so the\n    turn's steps survive a panel reload, not just the final reply text."
+
+    def to_dict(self) -> dict[str, Any]:
+        return {'ok': self.ok, 'terminal_session_id': self.terminal_session_id, 'upstream_session_id': self.upstream_session_id, 'output_tail': self.output_tail, 'reply_text': self.reply_text, 'error': self.error, 'status': self.status, 'usage': dict(self.usage), 'blocks': list(self.blocks)}
+'''
