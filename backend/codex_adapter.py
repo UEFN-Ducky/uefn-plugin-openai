@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import shlex
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -106,7 +107,7 @@ _model_fetch_inflight = False
 
 
 def _codex_catalog_path() -> Path:
-    return Path.home() / ".codex" / "models_cache.json"
+    return _codex_home() / "models_cache.json"
 
 
 def parse_codex_catalog(data: Any) -> list[dict[str, Any]]:
@@ -330,7 +331,7 @@ _EXEC_ONLY_BARE = {"--approve-for-me", "--oss"}
 
 
 def _toml_quote(value: str) -> str:
-    return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return json.dumps(value or "", ensure_ascii=False)
 
 
 _BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
@@ -473,6 +474,35 @@ def _dedupe_unmarked_uefn(text: str) -> str:
     return _join_marked_toml(cleaned, block)
 
 
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Readers see the old complete file or the new complete file."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                # Windows readers may briefly hold a non-delete-sharing handle.
+                # Keep the old file intact; never fall back to truncating it.
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 4:
+                    raise
+                time.sleep(0.01 * (2 ** attempt))
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _merge_marked_toml(path: Path, body: str) -> None:
     block = f"{_TOML_BEGIN}\n{body.rstrip()}\n{_TOML_END}\n"
     existing = ""
@@ -484,12 +514,12 @@ def _merge_marked_toml(path: Path, body: str) -> None:
     outside, _old = _split_marked_toml(existing)
     if "[mcp_servers.uefn]" in body:
         outside = _strip_toml_tables(outside, _UEFN_TOML_TABLES)
-    path.write_text(_join_marked_toml(outside, block), encoding="utf-8")
+    _atomic_write_text(path, _join_marked_toml(outside, block))
 
 
 def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
     """Rewrite stale `never` and drop duplicate [mcp_servers.uefn] on every load."""
-    home = Path(codex_home) if codex_home else Path.home() / ".codex"
+    home = Path(codex_home) if codex_home else _codex_home()
     try:
         home.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -521,7 +551,7 @@ def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
     new = _dedupe_unmarked_uefn(new)
     if new != text:
         try:
-            cfg.write_text(new, encoding="utf-8")
+            _atomic_write_text(cfg, new)
         except OSError:
             return False
         changed = True
@@ -539,7 +569,7 @@ def heal_codex_approval_policy(*, codex_home: Path | None = None) -> bool:
         )
         if en != et:
             try:
-                extra.write_text(en, encoding="utf-8")
+                _atomic_write_text(extra, en)
                 changed = True
             except OSError:
                 pass
@@ -550,8 +580,13 @@ def write_codex_uefn_profile(
     mcp_config_path: str,
     *,
     codex_home: Path | None = None,
+    per_run: bool = False,
 ) -> str:
-    """Write [mcp_servers.uefn] into config.toml (resume has no -p/--profile)."""
+    """Snapshot a run-local override, or atomically write the legacy profile.
+
+    Launch uses per_run: no shared identity/config writes, and the original
+    CODEX_HOME still owns authentication, skills and resumable thread storage.
+    """
     if not mcp_config_path:
         return ""
     src = Path(mcp_config_path)
@@ -570,7 +605,21 @@ def write_codex_uefn_profile(
         return ""
     args = [str(a) for a in (uefn.get("args") or [])]
     env = uefn.get("env") if isinstance(uefn.get("env"), dict) else {}
-    home = Path(codex_home) if codex_home else Path.home() / ".codex"
+    if per_run:
+        # Explicit empty identity values shadow legacy shared-config identities:
+        # Codex merges TOML tables recursively across configuration layers.
+        identity_keys = ("DUCKY_RUN_ID", "DUCKY_CONV_ID", "DUCKY_PROFILE_ID",
+                         "DUCKY_DUCKY_NAME", "DUCKY_MODEL", "DUCKY_GROUP_ID",
+                         "DUCKY_LEADER_CONV_ID", "DUCKY_CODING_AGENT")
+        run_env = {key: "" for key in identity_keys}
+        run_env.update({str(key): str(value) for key, value in env.items()})
+        env_toml = ", ".join(f"{_toml_quote(key)}={_toml_quote(value)}" for key, value in run_env.items())
+        return ("mcp_servers.uefn={command=" + _toml_quote(command)
+                + ", args=[" + ", ".join(_toml_quote(arg) for arg in args) + "]"
+                + ", env={" + env_toml + "}, enabled=true, required=true, "
+                + "startup_timeout_sec=60.0, tool_timeout_sec=1000000000000.0, "
+                + 'default_tools_approval_mode="approve"}')
+    home = Path(codex_home) if codex_home else _codex_home()
     try:
         home.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -595,7 +644,7 @@ def write_codex_uefn_profile(
     body = "\n".join(lines) + "\n"
     dest = home / f"{_CODEX_PROFILE}.config.toml"
     try:
-        dest.write_text("# Generated by UEFN-Ducky — rewritten each Codex launch.\n" + body, encoding="utf-8")
+        _atomic_write_text(dest, "# Generated by UEFN-Ducky.\n" + body)
         _merge_marked_toml(home / "config.toml", body)
     except OSError:
         return ""
@@ -1140,6 +1189,7 @@ class CodexAdapter:
                 error="Codex mode or extra arguments are unsupported for a restricted launch.",
             )
         original_push = push
+        env = dict(env or {})
 
         def push(event: dict[str, Any]) -> None:
             original_push({**event, "requested_mode": mode, "effective_mode": ""})
@@ -1163,7 +1213,7 @@ class CodexAdapter:
         from .cli_update import resolve_bin, should_heal_launch, update_cli
 
         try:
-            profile_ready = write_codex_uefn_profile(mcp_config_path)
+            profile_ready = write_codex_uefn_profile(mcp_config_path, per_run=True)
         except Exception:
             # Config errors may contain secrets; keep the launch error fixed.
             # BaseException control flow (including cancellation) must propagate.
@@ -1239,6 +1289,9 @@ class CodexAdapter:
                 reasoning_effort=effort,
                 mode=mode,
             )
+            # Last command-specific override wins over saved Agent extras. This
+            # immutable value is reused on setup repair and works with resume.
+            argv[-1:-1] = ["-c", profile_ready]
             state = _CodexStream(conv_id, run_id, push)
             if session_id:
                 push({"type": "status", "text": "Resumed Codex session…", "conv_id": conv_id, "run_id": run_id})

@@ -7,6 +7,7 @@ import importlib
 import json
 import sys
 import types
+import tomllib
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -66,7 +67,7 @@ def launch_env(tmp_path, monkeypatch):
 @pytest.mark.parametrize("session_id", ["", "existing-thread"])
 @pytest.mark.parametrize("failure", [
     "empty_path", "missing_file", "invalid_json", "missing_server",
-    "missing_command", "blocked_directory", "blocked_config",
+    "missing_command", "unreadable_config", "directory_config",
     "invalid_encoding", "invalid_args", "writer_oserror", "writer_runtimeerror",
 ])
 def test_ducky_readiness_failed_profile_never_launches(
@@ -84,10 +85,16 @@ def test_ducky_readiness_failed_profile_never_launches(
         config.write_text('{"mcpServers": {}}', encoding="utf-8")
     elif failure == "missing_command":
         config.write_text('{"mcpServers": {"uefn": {}}}', encoding="utf-8")
-    elif failure == "blocked_directory":
-        (tmp_path / ".codex").write_text("not a directory", encoding="utf-8")
-    elif failure == "blocked_config":
-        (tmp_path / ".codex" / "config.toml").mkdir(parents=True)
+    elif failure == "unreadable_config":
+        original_read = Path.read_text
+        def read(path, *args, **kw):
+            if path == config:
+                raise PermissionError(sensitive_marker)
+            return original_read(path, *args, **kw)
+        monkeypatch.setattr(Path, "read_text", read)
+    elif failure == "directory_config":
+        config.unlink()
+        config.mkdir()
     elif failure == "invalid_encoding":
         config.write_bytes(b"\xff\xfe\x80")
     elif failure == "invalid_args":
@@ -141,12 +148,12 @@ def test_ducky_readiness_normal_launch_keeps_mcp_required(launch_env, tmp_path, 
     adapter, process, update, config, events, kwargs, resolve = launch_env
 
     def run(**call):
-        # The profile is written before the process can be created.
-        profile = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
-        assert "[mcp_servers.uefn]" in profile
-        assert "startup_timeout_sec = 60.0" in profile
-        assert "required" not in profile  # Requirement belongs to Ducky turns only.
         argv = call["argv"]
+        profile = tomllib.loads(next(x for x in argv if x.startswith("mcp_servers.uefn={")))
+        assert profile["mcp_servers"]["uefn"]["startup_timeout_sec"] == 60.0
+        assert profile["mcp_servers"]["uefn"]["required"] is True
+        assert not (tmp_path / "config.toml").exists()
+        assert not (tmp_path / ".codex" / "config.toml").exists()
         assert "mcp_servers.uefn.required=true" in argv
         assert "tools.mcp__uefn__" in argv[-1]
         assert (argv[2:4] == ["resume", session_id]) if session_id else "resume" not in argv
