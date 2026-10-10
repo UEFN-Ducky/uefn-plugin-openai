@@ -958,11 +958,12 @@ class _CodexStream:
         cached = int(usage.get("cached_input_tokens") or usage.get("cache_read_tokens") or 0)
         out = int(usage.get("output_tokens") or 0)
         self.usage = {
-            "input_tokens": inp,
+            "input_tokens": max(0, inp - cached),
+            "cumulative_thread": self.session_id,
             "output_tokens": out,
             "cache_read_tokens": cached,
             "cache_write_tokens": 0,
-            "context_tokens": inp + cached,
+            "context_tokens": inp,
             "cost_usd": None,
             "num_turns": 0,
             "model": "",

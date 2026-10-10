@@ -559,3 +559,17 @@ class CodingAgentLaunchResult:
     def to_dict(self) -> dict[str, Any]:
         return {'ok': self.ok, 'terminal_session_id': self.terminal_session_id, 'upstream_session_id': self.upstream_session_id, 'output_tail': self.output_tail, 'reply_text': self.reply_text, 'error': self.error, 'status': self.status, 'usage': dict(self.usage), 'blocks': list(self.blocks)}
 '''
+
+
+@pytest.mark.parametrize("thread,inp,cached,out", [("thread-one", 100, 60, 5), ("thread-two", 500, 400, 30), ("thread-one", 0, 0, 0)])
+def test_usage_is_cumulative_and_cache_is_not_double_counted(launch_env, thread, inp, cached, out):
+    module, *_ = launch_env
+    state = module._CodexStream("test", "run", lambda event: None)
+    state.on_line(json.dumps({"type": "thread.started", "thread_id": thread}))
+    state.on_line(json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": inp, "cached_input_tokens": cached, "output_tokens": out}}))
+    assert state.usage["cumulative_thread"] == thread
+    assert state.usage["input_tokens"] == inp - cached
+    assert state.usage["cache_read_tokens"] == cached
+    assert state.usage["context_tokens"] == inp
+    assert state.usage["output_tokens"] == out
