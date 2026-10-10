@@ -1025,6 +1025,9 @@ class _CodexStream:
                 started = float(info.get("started_at") or 0.0)
                 ms = int((time.monotonic() - started) * 1000) if started else 0
                 failed = str(item.get("status") or "").lower() in ("failed", "error")
+                exit_code = item.get("exit_code") if itype == "command_execution" else None
+                if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                    failed = failed or exit_code != 0
                 status = "error" if failed else "success"
                 out_args = info.get("arguments") if isinstance(info.get("arguments"), dict) else args
                 if itype == "mcp_tool_call":
@@ -1071,6 +1074,9 @@ class _CodexStream:
                     result_text = truncate_tool_result(
                         str(item.get("aggregated_output") or item.get("output") or "")
                     )
+                if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                    # The checkpoint writer preserves result text, including on older hosts.
+                    result_text = f"Exit code: {exit_code}\n{result_text}"
                 out_name = str(info.get("name") or name)
                 tool_payload: dict[str, Any] = {
                     "name": out_name,

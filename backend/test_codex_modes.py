@@ -573,3 +573,18 @@ def test_usage_is_cumulative_and_cache_is_not_double_counted(launch_env, thread,
     assert state.usage["cache_read_tokens"] == cached
     assert state.usage["context_tokens"] == inp
     assert state.usage["output_tokens"] == out
+
+
+@pytest.mark.parametrize("exit_code", [0, 1, 2])
+def test_command_exit_code_survives_live_event_and_checkpoint(launch_env, exit_code):
+    module, _, _, _, events = launch_env
+    stream = module._CodexStream("chat", "run", events.append)
+    stream.on_line(json.dumps({"type": "item.completed", "item": {
+        "id": "tests", "type": "command_execution", "command": "pytest",
+        "status": "completed", "exit_code": exit_code, "aggregated_output": "test output",
+    }}))
+    event = next(e for e in events if e["type"] == "tool_done")
+    assert event["tool"]["status"] == ("error" if exit_code else "success")
+    assert event["tool"]["result"].startswith(f"Exit code: {exit_code}\n")
+    assert stream.finalize_blocks()[-1]["result"]["data"].startswith(f"Exit code: {exit_code}\n")
+    assert stream.error_text == ""
