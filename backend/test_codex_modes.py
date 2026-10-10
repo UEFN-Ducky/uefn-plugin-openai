@@ -358,6 +358,30 @@ def test_core_contract_and_mode_changes(launch_env):
         assert_mode_argv(calls[-1]["argv"], mode, "same-thread")
 
 
+@pytest.mark.parametrize("mode", ["agent", "ask", "plan"])
+@pytest.mark.parametrize("session_id", ["", "thread-one"])
+def test_a_long_brief_goes_to_codex_on_stdin_never_a_file_it_must_read(launch_env, mode, session_id):
+    # Ask/Plan's read-only sandbox blocks the shell read a temp file needed, so Codex
+    # never saw its instructions (Oct 10 live test: "the shell policy blocked the read").
+    adapter, _, kwargs, calls, _ = launch_env
+    long_message = "Pasted log line. " * 2000 + "Inspect the project"
+    kwargs.update(prompt=long_message)
+    result = adapter.CodexAdapter().launch(**kwargs, mode=mode, session_id=session_id)
+    assert result.ok and result.effective_mode == mode
+    call = calls[-1]
+    assert call["argv"][-1] == "-"
+    assert call["stdin_data"].endswith(long_message)
+    assert "Get-Content" not in " ".join(call["argv"])
+
+
+def test_a_short_message_stays_on_the_command_line(launch_env):
+    adapter, _, kwargs, calls, _ = launch_env
+    result = adapter.CodexAdapter().launch(**kwargs, mode="ask", session_id="thread-one")
+    assert result.ok
+    assert calls[-1]["stdin_data"] is None
+    assert calls[-1]["argv"][-1].endswith("Inspect")
+
+
 @pytest.mark.parametrize("extra", [
     "--dangerously-bypass-approvals-and-sandbox", "--approve-for-me", "--sandbox=workspace-write",
     "-s danger-full-access", "-sworkspace-write", "--config=sandbox_mode=workspace-write",

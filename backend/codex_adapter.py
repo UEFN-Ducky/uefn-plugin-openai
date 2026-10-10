@@ -308,20 +308,12 @@ def with_ducky_tools_hint(prompt: str) -> str:
 
 
 def inline_prompt_limit(binary: str) -> int:
-    """Longest prompt that goes straight on the command line. CreateProcess takes 32,767
-    characters and the rest of Codex's argv stays far below 8K; a .cmd/.bat shim runs
-    through cmd.exe, which stops at 8,191. Inline keeps a normal message out of a file the
-    agent would first have to open (it tried Ducky's workspace tools, which refuse AppData)."""
+    """Longest prompt that goes straight on the command line; a longer one goes on stdin.
+    CreateProcess takes 32,767 characters and the rest of Codex's argv stays far below 8K;
+    a .cmd/.bat shim runs through cmd.exe, which stops at 8,191."""
     return 2500 if Path(binary or "").suffix.lower() in (".cmd", ".bat") else 16000
 
 
-def prompt_file_instruction(path: object) -> str:
-    """The launch message when the brief is in a temp file: read it with the shell."""
-    return (
-        "Your instructions for this turn are in a UTF-8 file. Read it with your own shell first "
-        f"(PowerShell: Get-Content -Raw -Encoding UTF8 -LiteralPath '{path}'); Ducky's workspace "
-        "tools cannot open it. Then follow every instruction in it exactly (do not summarize first)."
-    )
 # `codex exec resume` is a smaller clap parser than `codex exec`.
 _EXEC_ONLY_VALUE = {
     "-p",
@@ -1313,155 +1305,148 @@ class CodexAdapter:
                            + "\n\n" + full_prompt)
         full_prompt = with_ducky_tools_hint(full_prompt)
 
-        # Windows CreateProcess dies with WinError 206 when argv is huge: a long brief
-        # goes in a temp file the agent reads first.
-        from backend.agent.coding_agents.mcp_inject import write_prompt_file
-
-        prompt_file = None
+        # Windows CreateProcess dies with WinError 206 when argv is huge (a .cmd shim stops
+        # at 8,191 characters): a long brief goes to Codex on stdin, prompt "-". It used to
+        # be a temp file the agent had to read with its shell first, which Ask/Plan's
+        # read-only sandbox blocks, so the agent never saw its instructions.
+        stdin_prompt: str | None = None
         launch_prompt = full_prompt
         if len(full_prompt) > inline_prompt_limit(binary):
-            prompt_file = write_prompt_file(full_prompt, conv_id=conv_id)
-            launch_prompt = prompt_file_instruction(prompt_file)
+            stdin_prompt = full_prompt
+            launch_prompt = "-"
         extra_flags: list[str] = ducky_launch_flags(mode)
         extra_dirs: list[Path] = []
-        if prompt_file is not None:
-            extra_dirs.append(Path(prompt_file).parent)
         skills = Path.home() / ".claude" / "skills"
         if skills.is_dir():
             extra_dirs.append(skills)
         extra_dirs.extend(codex_extra_dirs(cwd))
         if mode == "agent":
             extra_flags.extend(_writable_roots_flag(extra_dirs))
-        try:
-            from backend.agent.thinking_effort import normalize_thinking_effort
+        from backend.agent.thinking_effort import normalize_thinking_effort
 
-            effort = normalize_thinking_effort(str((env or {}).get("DUCKY_THINKING_EFFORT") or ""))
-            argv = build_codex_argv(
-                binary=binary,
-                prompt=launch_prompt,
-                model=model_id,
-                extra_args=extra_args,
-                session_id=session_id,
-                image_paths=list(image_paths or []),
-                extra_flags=extra_flags,
-                reasoning_effort=effort,
-                mode=mode,
-            )
-            # Last command-specific override wins over saved Agent extras. This
-            # immutable value is reused on setup repair and works with resume.
-            argv[-1:-1] = ["-c", profile_ready]
-            state = _CodexStream(conv_id, run_id, push)
-            if session_id:
-                push({"type": "status", "text": "Resumed Codex session…", "conv_id": conv_id, "run_id": run_id})
-            else:
-                push({"type": "status", "text": "Starting Codex…", "conv_id": conv_id, "run_id": run_id})
-            proc = run_streaming_process(
-                argv=argv,
-                cwd=cwd,
-                env_extra=env,
-                conv_id=conv_id,
-                on_line=state.on_line,
-                timeout_s=timeout_s,
-                cancel=cancel,
-            )
+        effort = normalize_thinking_effort(str((env or {}).get("DUCKY_THINKING_EFFORT") or ""))
+        argv = build_codex_argv(
+            binary=binary,
+            prompt=launch_prompt,
+            model=model_id,
+            extra_args=extra_args,
+            session_id=session_id,
+            image_paths=list(image_paths or []),
+            extra_flags=extra_flags,
+            reasoning_effort=effort,
+            mode=mode,
+        )
+        # Last command-specific override wins over saved Agent extras. This
+        # immutable value is reused on setup repair and works with resume.
+        argv[-1:-1] = ["-c", profile_ready]
+        state = _CodexStream(conv_id, run_id, push)
+        if session_id:
+            push({"type": "status", "text": "Resumed Codex session…", "conv_id": conv_id, "run_id": run_id})
+        else:
+            push({"type": "status", "text": "Starting Codex…", "conv_id": conv_id, "run_id": run_id})
+        proc = run_streaming_process(
+            argv=argv,
+            cwd=cwd,
+            env_extra=env,
+            conv_id=conv_id,
+            on_line=state.on_line,
+            timeout_s=timeout_s,
+            cancel=cancel,
+            stdin_data=stdin_prompt,
+        )
 
-            # Never leave a chip spinning: whatever ended this turn, resolve leftovers.
-            state.finish_unresolved_tools(cancelled=proc.cancelled)
-            blocks = state.finalize_blocks()
+        # Never leave a chip spinning: whatever ended this turn, resolve leftovers.
+        state.finish_unresolved_tools(cancelled=proc.cancelled)
+        blocks = state.finalize_blocks()
 
-            # Text before tool calls lives in blocks; the trailing segment is the
-            # final answer (all of it when no tools ran).
-            streamed_all = "".join(state.text_parts).strip()
-            reply = state.trailing_text() or ("" if blocks else streamed_all)
-            new_session = state.session_id or session_id
+        # Text before tool calls lives in blocks; the trailing segment is the
+        # final answer (all of it when no tools ran).
+        streamed_all = "".join(state.text_parts).strip()
+        reply = state.trailing_text() or ("" if blocks else streamed_all)
+        new_session = state.session_id or session_id
 
-            result = finalize_cli_turn(
-                proc=proc,
-                reply=reply,
-                streamed=bool(streamed_all) or bool(blocks),
-                blocks=blocks,
-                session_id=session_id,
-                new_session=new_session,
-                usage=state.usage,
-                agent_label="Codex",
-                timeout_s=timeout_s,
-                error_text=state.error_text,
-                stale_session_markers=("resume", "not found"),
-            )
-            def retry_stopped() -> bool:
-                # Terminal output can also contain repair markers. Never replay
-                # uncertain work, or begin repair after observing cancellation.
-                return (proc.cancelled or proc.timed_out
-                        or result.status in ("cancelled", "timeout")
-                        or (cancel is not None and cancel.is_set()))
+        result = finalize_cli_turn(
+            proc=proc,
+            reply=reply,
+            streamed=bool(streamed_all) or bool(blocks),
+            blocks=blocks,
+            session_id=session_id,
+            new_session=new_session,
+            usage=state.usage,
+            agent_label="Codex",
+            timeout_s=timeout_s,
+            error_text=state.error_text,
+            stale_session_markers=("resume", "not found"),
+        )
+        def retry_stopped() -> bool:
+            # Terminal output can also contain repair markers. Never replay
+            # uncertain work, or begin repair after observing cancellation.
+            return (proc.cancelled or proc.timed_out
+                    or result.status in ("cancelled", "timeout")
+                    or (cancel is not None and cancel.is_set()))
 
-            if retry_stopped():
-                return with_mode(result)
-            if result.ok or not should_heal_launch(
-                result.error or "",
-                result.reply_text or "",
-                proc.stderr_tail,
-                proc.raw_tail,
-                state.error_text,
-            ):
-                return with_mode(result)
-            if retry_stopped():
-                return with_mode(result)
-            push(
-                {
-                    "type": "status",
-                    "text": "Codex CLI is stale or missing — updating automatically…",
-                    "conv_id": conv_id,
-                    "run_id": run_id,
-                }
+        if retry_stopped():
+            return with_mode(result)
+        if result.ok or not should_heal_launch(
+            result.error or "",
+            result.reply_text or "",
+            proc.stderr_tail,
+            proc.raw_tail,
+            state.error_text,
+        ):
+            return with_mode(result)
+        if retry_stopped():
+            return with_mode(result)
+        push(
+            {
+                "type": "status",
+                "text": "Codex CLI is stale or missing — updating automatically…",
+                "conv_id": conv_id,
+                "run_id": run_id,
+            }
+        )
+        if retry_stopped():
+            return with_mode(result)
+        upd = update_cli(binary)
+        if retry_stopped():
+            return with_mode(result)
+        if not upd.get("ok"):
+            result.error = (
+                (result.error or "")
+                + "\n\nDucky tried to update Codex automatically and failed: "
+                + str(upd.get("error") or "unknown")
             )
-            if retry_stopped():
-                return with_mode(result)
-            upd = update_cli(binary)
-            if retry_stopped():
-                return with_mode(result)
-            if not upd.get("ok"):
-                result.error = (
-                    (result.error or "")
-                    + "\n\nDucky tried to update Codex automatically and failed: "
-                    + str(upd.get("error") or "unknown")
-                )
-                return with_mode(result)
-            binary = resolve_bin(cli_path) or str(upd.get("cli_path") or binary)
-            argv[0] = binary
-            state = _CodexStream(conv_id, run_id, push)
-            if retry_stopped():
-                return with_mode(result)
-            proc = run_streaming_process(
-                argv=argv,
-                cwd=cwd,
-                env_extra=env,
-                conv_id=conv_id,
-                on_line=state.on_line,
-                timeout_s=timeout_s,
-                cancel=cancel,
-            )
-            state.finish_unresolved_tools(cancelled=proc.cancelled)
-            blocks = state.finalize_blocks()
-            streamed_all = "".join(state.text_parts).strip()
-            reply = state.trailing_text() or ("" if blocks else streamed_all)
-            new_session = state.session_id or session_id
-            return with_mode(finalize_cli_turn(
-                proc=proc,
-                reply=reply,
-                streamed=bool(streamed_all) or bool(blocks),
-                blocks=blocks,
-                session_id=session_id,
-                new_session=new_session,
-                usage=state.usage,
-                agent_label="Codex",
-                timeout_s=timeout_s,
-                error_text=state.error_text,
-                stale_session_markers=("resume", "not found"),
-            ))
-        finally:
-            if prompt_file is not None:
-                try:
-                    prompt_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            return with_mode(result)
+        binary = resolve_bin(cli_path) or str(upd.get("cli_path") or binary)
+        argv[0] = binary
+        state = _CodexStream(conv_id, run_id, push)
+        if retry_stopped():
+            return with_mode(result)
+        proc = run_streaming_process(
+            argv=argv,
+            cwd=cwd,
+            env_extra=env,
+            conv_id=conv_id,
+            on_line=state.on_line,
+            timeout_s=timeout_s,
+            cancel=cancel,
+            stdin_data=stdin_prompt,
+        )
+        state.finish_unresolved_tools(cancelled=proc.cancelled)
+        blocks = state.finalize_blocks()
+        streamed_all = "".join(state.text_parts).strip()
+        reply = state.trailing_text() or ("" if blocks else streamed_all)
+        new_session = state.session_id or session_id
+        return with_mode(finalize_cli_turn(
+            proc=proc,
+            reply=reply,
+            streamed=bool(streamed_all) or bool(blocks),
+            blocks=blocks,
+            session_id=session_id,
+            new_session=new_session,
+            usage=state.usage,
+            agent_label="Codex",
+            timeout_s=timeout_s,
+            error_text=state.error_text,
+            stale_session_markers=("resume", "not found"),
+        ))

@@ -26,7 +26,6 @@ from codex_adapter import (
     inline_prompt_limit,
     normalize_codex_model,
     parse_codex_catalog,
-    prompt_file_instruction,
     with_ducky_tools_hint,
     write_codex_uefn_profile,
 )
@@ -343,13 +342,9 @@ def test_every_turn_says_where_ducky_tools_are():
     assert "tools.mcp__uefn__" in text and text.endswith("Continue.")
 
 
-def test_a_normal_message_goes_inline_and_a_file_brief_says_to_read_it_with_the_shell():
-    # A coordinator prompt of a few thousand characters must not become a file the agent can't open.
+def test_a_normal_message_fits_the_command_line_of_each_launcher():
     assert inline_prompt_limit(r"C:\Programs\OpenAI\Codex\bin\codex.exe") >= 8000
     assert inline_prompt_limit(r"C:\Roaming\npm\codex.cmd") <= 2500  # cmd.exe stops at 8,191
-    text = prompt_file_instruction(r"C:\tmp\ducky-prompt-x.txt")
-    assert r"Get-Content -Raw -Encoding UTF8 -LiteralPath 'C:\tmp\ducky-prompt-x.txt'" in text
-    assert "cannot open it" in text
 
 
 def test_write_strips_unmarked_uefn_duplicate(tmp_path: Path):
