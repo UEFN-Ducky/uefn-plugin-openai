@@ -756,8 +756,15 @@ def _tool_args_from_item(itype: str, item: dict[str, Any]) -> dict[str, Any]:
         cmd = str(item.get("command") or "").strip()
         return {"command": cmd} if cmd else {}
     if itype == "web_search":
-        query = str(item.get("query") or "").strip()
-        return {"query": query} if query else {}
+        out = {key: item[key] for key in ("query", "url", "pattern") if isinstance(item.get(key), str)}
+        action = item.get("action")
+        if isinstance(action, dict):
+            clean = {key: action[key] for key in ("type", "query", "url", "pattern") if isinstance(action.get(key), str)}
+            if isinstance(action.get("queries"), list):
+                clean["queries"] = [q for q in action["queries"] if isinstance(q, str)]
+            if clean:
+                out["action"] = clean
+        return out
     if itype == "file_change":
         changes = item.get("changes")
         if isinstance(changes, list):
@@ -1010,6 +1017,8 @@ class _CodexStream:
                 started = float(info.get("started_at") or 0.0)
                 ms = int((time.monotonic() - started) * 1000) if started else 0
                 failed = str(item.get("status") or "").lower() in ("failed", "error")
+                status = "error" if failed else "success"
+                out_args = info.get("arguments") if isinstance(info.get("arguments"), dict) else args
                 if itype == "mcp_tool_call":
                     result_text = _mcp_result_text(item)
                 elif itype == "file_change":
@@ -1020,14 +1029,41 @@ class _CodexStream:
                             bits.append(f"{c.get('kind') or 'update'}: {c.get('path')}")
                     result_text = truncate_tool_result("\n".join(bits) if bits else "")
                 elif itype == "web_search":
-                    result_text = truncate_tool_result(str(item.get("query") or ""))
+                    # Completion may supply action details absent from item.started.
+                    out_args = {**out_args, **args}
+                    if isinstance(out_args.get("action"), dict):
+                        out_args["action"] = {**info.get("arguments", {}).get("action", {}), **out_args["action"]}
+                    if str(item.get("status") or "").lower() in ("cancelled", "canceled"):
+                        status, failed = "cancelled", True
+                    payload = {key: item[key] for key in ("query", "title", "url", "excerpt") if isinstance(item.get(key), str)}
+                    for key in ("results", "sources"):
+                        rows = item.get(key)
+                        if isinstance(rows, list):
+                            clean_rows = [
+                                {field: row[field] for field in ("title", "url", "snippet") if isinstance(row.get(field), str)}
+                                for row in rows if isinstance(row, dict) and isinstance(row.get("url"), str)
+                            ]
+                            # Malformed supplied rows do not establish an empty search.
+                            if clean_rows or not rows:
+                                payload[key] = clean_rows
+                    error = item.get("error")
+                    if isinstance(error, dict):
+                        error = error.get("message")
+                    if isinstance(error, str):
+                        payload["error"] = error
+                    content = item.get("text", item.get("content"))
+                    if isinstance(content, list):
+                        content = "\n".join(row["text"] for row in content if isinstance(row, dict) and row.get("type") == "text" and isinstance(row.get("text"), str))
+                    if isinstance(content, str) and content:
+                        # Keep text last so the existing truncated-JSON card fallback
+                        # can still recover the preceding source metadata.
+                        payload["text"] = content
+                    result_text = truncate_tool_result(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 else:
                     result_text = truncate_tool_result(
                         str(item.get("aggregated_output") or item.get("output") or "")
                     )
-                status = "error" if failed else "success"
                 out_name = str(info.get("name") or name)
-                out_args = info.get("arguments") if isinstance(info.get("arguments"), dict) else args
                 tool_payload: dict[str, Any] = {
                     "name": out_name,
                     "arguments": out_args,
