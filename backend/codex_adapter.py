@@ -1150,7 +1150,7 @@ class CodexAdapter:
         needs_api_key=False,
         needs_cli=True,
         resume=True,
-        **({"supported_modes": ("ask", "plan", "agent") if _HOST_MODE_CONTRACT else ("agent",)}
+        **({"supported_modes": ("agent",)}
            if "supported_modes" in _CAPABILITY_PARAMETERS else {}),
     )
 
@@ -1208,16 +1208,14 @@ class CodexAdapter:
     ) -> CodingAgentLaunchResult:
         try:
             mode = normalize_coding_mode(mode)
-            # Validate before profile writes, CLI resolution or auto-install.
+            # Native sandbox flags do not enforce Ducky MCP permissions.
+            # Refuse before model/config resolution or any external setup.
             if mode != "agent":
-                if not _HOST_MODE_CONTRACT:
-                    return _launch_result(
-                        ok=False, status="error", upstream_session_id=session_id,
-                        requested_mode=mode, effective_mode="",
-                        error="Codex Ask/Plan requires an app with the coding-agent mode contract.",
-                    )
-                build_codex_argv(binary="codex", prompt="", model="auto",
-                                 extra_args=extra_args, session_id=session_id, mode=mode)
+                return _launch_result(
+                    ok=False, status="error", upstream_session_id=session_id,
+                    requested_mode=mode, effective_mode="",
+                    error="Codex Ask/Plan is unavailable because Ducky MCP read-only enforcement is not supported. Use Agent mode or an embedded Ducky model.",
+                )
         except ValueError:
             return _launch_result(
                 ok=False, status="error", upstream_session_id=session_id,
