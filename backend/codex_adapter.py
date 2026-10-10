@@ -46,6 +46,13 @@ _HOST_MODE_CONTRACT = (
     and {"requested_mode", "effective_mode"} <= _RESULT_PARAMETERS.keys()
 )
 
+# Published hosts without the shared mode gate stay Agent-only.
+try:
+    from backend.bridge.shared_mcp import _calling_mode as _shared_calling_mode
+except ImportError:
+    _shared_calling_mode = None
+_HOST_MODE_CONTRACT = _HOST_MODE_CONTRACT and callable(_shared_calling_mode)
+
 
 def _launch_result(**kwargs: Any) -> CodingAgentLaunchResult:
     for key in ("requested_mode", "effective_mode"):
@@ -1150,7 +1157,7 @@ class CodexAdapter:
         needs_api_key=False,
         needs_cli=True,
         resume=True,
-        **({"supported_modes": ("agent",)}
+        **({"supported_modes": (("agent", "ask", "plan") if _HOST_MODE_CONTRACT else ("agent",))}
            if "supported_modes" in _CAPABILITY_PARAMETERS else {}),
     )
 
@@ -1210,12 +1217,16 @@ class CodexAdapter:
             mode = normalize_coding_mode(mode)
             # Native sandbox flags do not enforce Ducky MCP permissions.
             # Refuse before model/config resolution or any external setup.
-            if mode != "agent":
+            if mode != "agent" and not _HOST_MODE_CONTRACT:
                 return _launch_result(
                     ok=False, status="error", upstream_session_id=session_id,
                     requested_mode=mode, effective_mode="",
                     error="Codex Ask/Plan is unavailable because Ducky MCP read-only enforcement is not supported. Use Agent mode or an embedded Ducky model.",
                 )
+            if mode != "agent":
+                # Validate before config files, CLI setup, or progress events.
+                build_codex_argv(binary="codex", prompt="", model="auto",
+                                 extra_args=extra_args, session_id=session_id, mode=mode)
         except ValueError:
             return _launch_result(
                 ok=False, status="error", upstream_session_id=session_id,
@@ -1287,6 +1298,12 @@ class CodexAdapter:
         # System context only on the first turn; the resumed thread keeps it.
         if system_prompt.strip() and not session_id:
             full_prompt = system_prompt.strip() + "\n\n" + prompt
+        if mode != "agent":
+            full_prompt = (f"Ducky {mode.title()} mode: inspect read-only; do not change project files. "
+                           "Write tools and shell edits are refused. "
+                           + ("Create the plan using ducky_create_plan and Ducky plan tools, then stop. "
+                              if mode == "plan" else "Answer the question using read-only tools. ")
+                           + "\n\n" + full_prompt)
         full_prompt = with_ducky_tools_hint(full_prompt)
 
         # Windows CreateProcess dies with WinError 206 when argv is huge: a long brief

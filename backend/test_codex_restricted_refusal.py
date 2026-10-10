@@ -36,25 +36,7 @@ def assert_refused(result, requested, session, events):
     assert not events  # Refusal occurs before any launch/progress/success stream.
 
 
-@pytest.mark.parametrize("mode", ["ask", "plan", " Ask ", " PLAN "])
-@pytest.mark.parametrize("session", ["", "original-thread"])
-@pytest.mark.parametrize("cancelled", [False, True])
-def test_restricted_refusal_precedes_all_setup(launch_env, monkeypatch, mode, session, cancelled):
-    module, updater, kw, calls, events = launch_env
-    guards = forbid_setup(module, updater, monkeypatch)
-    cancel = threading.Event()
-    if cancelled:
-        cancel.set()
-    kw.update(model="PRIVATE_MODEL", mcp_config_path="PRIVATE_CONFIG",
-              env={"PRIVATE_TOKEN": "PRIVATE_SECRET"})
-    result = module.CodexAdapter().launch(**kw, mode=mode, session_id=session, cancel=cancel)
-    assert_refused(result, mode.strip().lower(), session, events)
-    for guard in guards:
-        guard.assert_not_called()
-    assert not calls
-
-
-@pytest.mark.parametrize("profile", ["current", "legacy", "missing_helper", "old_capabilities", "old_result"])
+@pytest.mark.parametrize("profile", ["legacy", "missing_helper", "old_capabilities", "old_result"])
 @pytest.mark.parametrize("session", ["", "original-thread"])
 def test_registered_capabilities_are_agent_only(launch_env, monkeypatch, profile, session):
     with registered_profile(launch_env, monkeypatch, profile) as (module, agent, kw, calls, events, base):
@@ -105,19 +87,11 @@ def test_mode_switches_never_reuse_agent_authority(launch_env, monkeypatch, sess
     for mode in ("agent", "ask", "plan", "agent", "plan", "ask"):
         events.clear()
         count = len(calls)
-        if mode == "agent":
-            result = agent.launch(**kw, mode=mode, session_id=session)
-            assert result.ok and result.effective_mode == "agent"
-            assert len(calls) == count + 1
-            session = result.upstream_session_id
-        else:
-            with monkeypatch.context() as patch:
-                writer = Mock(side_effect=AssertionError("PRIVATE_SETUP_TRIPWIRE"))
-                patch.setattr(module, "write_codex_uefn_profile", writer)
-                result = agent.launch(**kw, mode=mode, session_id=session)
-                assert_refused(result, mode, session, events)
-                writer.assert_not_called()
-            assert len(calls) == count
+        result = agent.launch(**kw, mode=mode, session_id=session)
+        assert result.ok and result.effective_mode == mode
+        assert len(calls) == count + 1
+        assert_mode_argv(calls[-1]["argv"], mode, session)
+        session = result.upstream_session_id
     updater.update_cli.assert_not_called()
 
 

@@ -1,8 +1,4 @@
-"""Agent compatibility and fail-closed restricted modes at public launch.
-
-Native argv helpers retain their sandbox checks, but public Ask/Plan launch now
-refuses: those flags alone cannot enforce Ducky MCP write authorization.
-"""
+"""Read-only Ask/Plan launches and compatibility with older Agent-only hosts."""
 from __future__ import annotations
 
 import importlib
@@ -16,18 +12,6 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-
-
-def assert_restricted_refusal(launch_env, result, mode, session):
-    module, updater, _, calls, events = launch_env
-    assert not result.ok and result.status == "error"
-    assert result.requested_mode == mode and result.effective_mode == ""
-    assert result.upstream_session_id == session and not result.reply_text
-    assert "MCP read-only enforcement is not supported" in result.error
-    assert not calls and not events
-    module.run_streaming_process.assert_not_called()
-    updater.resolve_bin.assert_not_called()
-    updater.update_cli.assert_not_called()
 
 
 @pytest.mark.parametrize("mode", ["ask", "plan", "agent"])
@@ -54,9 +38,6 @@ def test_terminal_repair_marker_never_replays(launch_env, monkeypatch, mode, ses
     updater.update_cli.side_effect = None
     updater.update_cli.return_value = {"ok": True}
     result = module.CodexAdapter().launch(**kwargs, mode=mode, session_id=session)
-    if mode != "agent":
-        assert_restricted_refusal(launch_env, result, mode, session)
-        return
     assert (updater.update_cli.call_count, module.run_streaming_process.call_count) == (0, 1)
     classifier.assert_not_called()
     assert not result.ok and result.status == ending
@@ -81,9 +62,6 @@ def test_real_nonterminal_repair_classifier_retains_flags(launch_env, mode, sess
     updater.update_cli.side_effect = None
     updater.update_cli.return_value = {"ok": True}
     result = module.CodexAdapter().launch(**kwargs, mode=mode, session_id=session)
-    if mode != "agent":
-        assert_restricted_refusal(launch_env, result, mode, session)
-        return
     assert result.ok and result.effective_mode == mode
     assert len(attempts) == 2 and attempts[0] == attempts[1]
     updater.update_cli.assert_called_once()
@@ -339,6 +317,10 @@ def assert_mode_argv(argv, mode, session_id):
         assert "--add-dir" not in argv
         assert not any("workspace-write" in s or "writable_roots" in s for s in argv[:-1])
         assert 'approval_policy="never"' in argv
+        assert '--ignore-rules' in argv
+        assert 'do not change project files' in argv[-1]
+        if mode == 'plan':
+            assert 'ducky_create_plan' in argv[-1]
     if session_id:
         index = argv.index("resume")
         assert argv[index + 1] == session_id
@@ -352,9 +334,6 @@ def assert_mode_argv(argv, mode, session_id):
 def test_launch_modes(launch_env, mode, session_id):
     adapter, updater, kwargs, calls, events = launch_env
     result = adapter.CodexAdapter().launch(**kwargs, mode=mode, session_id=session_id)
-    if mode != "agent":
-        assert_restricted_refusal(launch_env, result, mode, session_id)
-        return
     assert result.ok
     assert result.requested_mode == result.effective_mode == mode
     assert result.upstream_session_id == "thread-one"
@@ -369,20 +348,14 @@ def test_launch_modes(launch_env, mode, session_id):
 def test_core_contract_and_mode_changes(launch_env):
     adapter, _, kwargs, calls, _ = launch_env
     instance = adapter.CodexAdapter()
-    assert instance.capabilities.supported_modes == ("agent",)
+    assert instance.capabilities.supported_modes == ("agent", "ask", "plan")
     assert "mode" in inspect.signature(instance.launch).parameters
     for mode in ("agent", "ask", "plan", "agent", "ask"):
         previous_calls = len(calls)
         result = instance.launch(**kwargs, mode=mode, session_id="same-thread")
-        if mode == "agent":
-            assert result.ok and result.effective_mode == mode
-            assert len(calls) == previous_calls + 1
-            assert_mode_argv(calls[-1]["argv"], mode, "same-thread")
-        else:
-            assert not result.ok and result.status == "error"
-            assert result.requested_mode == mode and result.effective_mode == ""
-            assert result.upstream_session_id == "same-thread"
-            assert len(calls) == previous_calls
+        assert result.ok and result.effective_mode == mode
+        assert len(calls) == previous_calls + 1
+        assert_mode_argv(calls[-1]["argv"], mode, "same-thread")
 
 
 @pytest.mark.parametrize("extra", [
@@ -404,7 +377,7 @@ def test_restricted_overrides_fail_before_side_effects(launch_env, monkeypatch, 
     result = adapter.CodexAdapter().launch(**kwargs, mode=mode, session_id=session_id)
     assert not result.ok and result.status == "error"
     assert result.requested_mode == mode and result.effective_mode == ""
-    assert "MCP read-only enforcement is not supported" in result.error
+    assert "unsupported" in result.error
     assert result.upstream_session_id == session_id
     assert not calls and not events
     writer.assert_not_called()
@@ -440,9 +413,6 @@ def test_failed_launch_does_not_confirm_mode(launch_env, monkeypatch, mode, sess
             cancelled=failure == "cancelled", timed_out=failure == "timeout",
             returncode=1, stderr_tail=errors.get(failure, ""), raw_tail="")
     result = adapter.CodexAdapter().launch(**kwargs, mode=mode, session_id=session_id)
-    if mode != "agent":
-        assert_restricted_refusal(launch_env, result, mode, session_id)
-        return
     assert not result.ok and result.effective_mode == "" and result.requested_mode == mode
     assert "PRIVATE" not in repr(result) + repr(events)
     if failure == "readiness":
@@ -471,9 +441,6 @@ def test_heal_retry_preserves_mode_and_required_server(launch_env, monkeypatch, 
     updater.update_cli.side_effect = None
     updater.update_cli.return_value = {"ok": True}
     result = adapter.CodexAdapter().launch(**kwargs, mode=mode, session_id=session_id)
-    if mode != "agent":
-        assert_restricted_refusal(launch_env, result, mode, session_id)
-        return
     assert result.ok and result.effective_mode == mode
     assert len(captured) == 2 and captured[0] == captured[1]
     for argv in captured:
@@ -501,7 +468,8 @@ def test_partial_reply_with_failed_process_cannot_confirm_restriction(launch_env
         return proc
     adapter.run_streaming_process.side_effect = run
     result = adapter.CodexAdapter().launch(**kwargs, mode=mode, session_id=session_id)
-    assert_restricted_refusal(launch_env, result, mode, session_id)
+    assert not result.ok and result.effective_mode == ""
+    assert "restricted mode was not confirmed" in result.error
 
 
 @pytest.mark.parametrize("mode", ["ask", "plan"])
@@ -513,7 +481,9 @@ def test_restricted_ignores_saved_execution_allow_rules(launch_env, tmp_path, mo
     (rules / "default.rules").write_text(
         'prefix_rule(pattern=["powershell"], decision="allow")', encoding="utf-8")
     result = adapter.CodexAdapter().launch(**kwargs, mode=mode, session_id=session_id)
-    assert_restricted_refusal(launch_env, result, mode, session_id)
+    assert result.ok and result.effective_mode == mode
+    assert_mode_argv(calls[0]["argv"], mode, session_id)
+    assert "--ignore-rules" in calls[0]["argv"]
 
 
 @pytest.mark.parametrize("mode", ["ask", "plan"])
