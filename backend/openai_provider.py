@@ -143,7 +143,7 @@ def to_responses_input(messages: list[ProviderMessage]) -> list[dict[str, Any]]:
                         "type": "function_call",
                         "call_id": tc.id,
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments or {}),
+                        "arguments": json.dumps(tc.arguments or {}, ensure_ascii=False, separators=(",", ":")),
                     }
                 )
             continue
@@ -171,18 +171,26 @@ def _event_delta(event: Any) -> str:
 
 
 def _responses_usage(usage: Any) -> dict[str, int]:
+    # Plugins can be updated independently of the app. Older app parsers only
+    # understand Chat Completions, so keep Responses accounting self-contained.
+    data = _as_dict(usage)
+    if data is not None and "input_tokens" in data:
+        details = data.get("input_tokens_details") or {}
+        return {
+            "input_tokens": int(data.get("input_tokens") or 0),
+            "output_tokens": int(data.get("output_tokens") or 0),
+            "cache_read_tokens": int(details.get("cached_tokens") or 0),
+            "cache_write_tokens": int(details.get("cache_write_tokens") or 0),
+        }
     parsed = parse_openai_usage(usage)
-    if parsed.get("input_tokens") or parsed.get("output_tokens"):
+    if parsed.get("input_tokens") or parsed.get("output_tokens") or usage is None:
         return parsed
-    if usage is None:
-        return {}
+    details = getattr(usage, "input_tokens_details", None)
     return {
         "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
         "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
-        "cache_read_tokens": int(
-            getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
-        ),
-        "cache_write_tokens": 0,
+        "cache_read_tokens": int(getattr(details, "cached_tokens", 0) or 0),
+        "cache_write_tokens": int(getattr(details, "cache_write_tokens", 0) or 0),
     }
 
 
@@ -242,7 +250,7 @@ class OpenAIProvider:
                             "type": "function",
                             "function": {
                                 "name": tc.name,
-                                "arguments": json.dumps(tc.arguments),
+                                "arguments": json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":")),
                             },
                         }
                         for tc in m.tool_calls
