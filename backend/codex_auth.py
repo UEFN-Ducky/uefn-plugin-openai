@@ -27,22 +27,23 @@ def _no_window() -> dict[str, Any]:
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
 
 
-def _codex(cli_path: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+def _codex(cli_path: str, *args: str, home: str = "") -> subprocess.CompletedProcess[str] | None:
     from .cli_update import resolve_bin
 
     binary = resolve_bin(cli_path)
     if not binary:
         return None
+    env = {**os.environ, **account_env(home)} if home else None
     try:
         return subprocess.run([binary, *args], capture_output=True, text=True, timeout=20,
-                              encoding="utf-8", errors="replace", **_no_window())
+                              encoding="utf-8", errors="replace", env=env, **_no_window())
     except (OSError, subprocess.SubprocessError):
         return None
 
 
-def codex_logged_in(cli_path: str = "") -> bool | None:
+def codex_logged_in(cli_path: str = "", home: str = "") -> bool | None:
     """`codex login status`: True / False, or None when Codex could not say."""
-    proc = _codex(cli_path, "login", "status")
+    proc = _codex(cli_path, "login", "status", home=home)
     if proc is None:
         return None
     text = f"{proc.stdout}\n{proc.stderr}".lower()
@@ -154,6 +155,52 @@ def logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
     if codex_logged_in(cli_path):
         return {"ok": False, "logged_in": True, "error": (proc.stderr or proc.stdout or "Logout did not take effect").strip()[:300]}
     return {"ok": True, "logged_in": False, "message": "Logged out of Codex."}
+
+
+# Extra accounts: core keeps the list and the folder; each Codex login lives in its own CODEX_HOME.
+# Shared with ~/.codex so every account keeps the person's settings, prompts and skills; auth.json,
+# sessions and history stay per account. Ducky's MCP server rides each launch as a `-c` override,
+# so a shared config.toml never outranks it.
+ACCOUNT_SHARED = {"dirs": ["prompts", "skills"], "files": ["config.toml", "AGENTS.md"]}
+_LIMIT_RE = re.compile(r"usage[ _]limit|usage_limit_reached|rate_limit_exceeded|hit your (usage )?limit"
+                       r"|too many requests|\b429\b", re.I)
+_QUOTA_RE = re.compile(r"\b429\b|rate[ _]limit|insufficient_quota|quota|too many requests", re.I)
+
+
+def account_env(config_dir: str) -> dict[str, str]:
+    return {"CODEX_HOME": str(config_dir)} if config_dir else {}
+
+
+def account_login(config_dir: str, *, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+    """Core's login terminal: device-code sign-in, which works from any device."""
+    from .cli_update import resolve_bin
+
+    binary = resolve_bin(cli_path)
+    if not binary:
+        return {"ok": False, "error": "Codex CLI not found. Press Detect on the Codex row, then Log in again."}
+    os.makedirs(config_dir, exist_ok=True)
+    return {"argv": [binary, "login", "--device-auth"], "env": account_env(config_dir)}
+
+
+def account_status(config_dir: str, *, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+    return {"loggedIn": bool(codex_logged_in(cli_path, home=config_dir))}
+
+
+def account_logout(config_dir: str, *, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+    proc = _codex(cli_path, "logout", home=config_dir)
+    if proc is None:
+        return {"ok": False, "error": "Codex CLI not found"}
+    return {"ok": not codex_logged_in(cli_path, home=config_dir)}
+
+
+def is_limit_error(text: str) -> bool:
+    """A Codex turn that stopped on the ChatGPT plan's usage limit."""
+    return bool(_LIMIT_RE.search(text or ""))
+
+
+def is_quota_error(text: str) -> bool:
+    """An OpenAI API key out of quota or rate limited."""
+    return bool(_QUOTA_RE.search(text or ""))
 
 
 def login_message(push: Any) -> str:
