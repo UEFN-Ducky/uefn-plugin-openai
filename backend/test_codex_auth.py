@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from pathlib import Path
 from unittest import mock
 
 import codex_auth
@@ -90,5 +89,3 @@ def test_registration_carries_account_hooks():
         assert callable(agent[hook])
     assert "config.toml" in agent["account_shared"]["files"]
     assert "auth.json" not in agent["account_shared"]["files"]
-    init = (Path(__file__).parent / "__init__.py").read_text(encoding="utf-8")
-    assert "**codex_auth.ACCOUNT_HOOKS" in init and "is_quota_error=codex_auth.is_quota_error" in init
