@@ -103,6 +103,7 @@ def register(api) -> None:
         cache_mode="cached",
         cache_ttl_s=300,
         shows_thinking_effort=True,
+        is_quota_error=codex_auth.is_quota_error,
     )
     api.register_coding_agent(
         "codex",
@@ -125,6 +126,7 @@ def register(api) -> None:
         login_cancel=codex_auth.cancel_login,
         logout=codex_auth.logout,
         login_status_ok="logged in",
+        **codex_auth.ACCOUNT_HOOKS,
         shows_thinking_effort=True,
         # Codex works through Ducky's tools only, so Ducky's approval modes apply to it:
         # Ducky asks before its file changes (Ask before changes) and its terminal commands.

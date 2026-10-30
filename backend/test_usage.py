@@ -1,6 +1,17 @@
 from __future__ import annotations
 
+import json
+
+import usage
 from usage import windows_from_headers, windows_from_wham
+
+
+def test_account_usage_reads_that_accounts_login(tmp_path, monkeypatch) -> None:
+    (tmp_path / "auth.json").write_text(json.dumps({"tokens": {"access_token": "work-tok", "account_id": "a1"}}),
+                                        encoding="utf-8")
+    monkeypatch.setattr(usage, "_wham", lambda token, account: [{"id": "hourly", "token": token, "account": account}])
+    assert usage.account_usage(str(tmp_path)) == [{"id": "hourly", "token": "work-tok", "account": "a1"}]
+    assert usage.account_usage(str(tmp_path / "signed-out")) == []
 
 
 def test_wham_five_hour_and_weekly() -> None:

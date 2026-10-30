@@ -109,8 +109,8 @@ def windows_from_headers(headers: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _codex_auth() -> tuple[str, str]:
-    path = Path.home() / ".codex" / "auth.json"
+def _codex_auth(home: str = "") -> tuple[str, str]:
+    path = Path(home or Path.home() / ".codex") / "auth.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -123,27 +123,36 @@ def _codex_auth() -> tuple[str, str]:
     return token, account
 
 
+def _wham(token: str, account: str) -> list[dict[str, Any]]:
+    try:
+        import httpx
+
+        headers = {"Authorization": f"Bearer {token}"}
+        if account:
+            headers["ChatGPT-Account-Id"] = account
+        r = httpx.get(
+            "https://chatgpt.com/backend-api/wham/usage",
+            headers=headers,
+            timeout=8.0,
+            follow_redirects=True,
+        )
+        return windows_from_wham(r.json()) if r.status_code < 400 else []
+    except Exception:
+        return []
+
+
+def account_usage(config_dir: str, **_kw: Any) -> list[dict[str, Any]]:
+    """Plan windows of one Codex login (its CODEX_HOME)."""
+    token, account = _codex_auth(config_dir)
+    return _wham(token, account) if token else []
+
+
 def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
     token, account = _codex_auth()
     if token:
-        try:
-            import httpx
-
-            headers = {"Authorization": f"Bearer {token}"}
-            if account:
-                headers["ChatGPT-Account-Id"] = account
-            r = httpx.get(
-                "https://chatgpt.com/backend-api/wham/usage",
-                headers=headers,
-                timeout=8.0,
-                follow_redirects=True,
-            )
-            if r.status_code < 400:
-                rows = windows_from_wham(r.json())
-                if rows:
-                    return {"windows": rows}
-        except Exception:
-            pass
+        rows = _wham(token, account)
+        if rows:
+            return {"windows": rows}
     key = (api_key or "").strip()
     if not key:
         return {"windows": []}

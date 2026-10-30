@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+from unittest import mock
 
 import codex_auth
 from codex_auth import codex_logged_in, parse_login_output
@@ -40,7 +42,7 @@ def test_browser_login_gives_the_link_only():
 def test_login_status_reads_signed_in_signed_out_and_unknown(monkeypatch):
     def status(out: str, code: int):
         monkeypatch.setattr(codex_auth, "_codex",
-                            lambda *_a: subprocess.CompletedProcess([], code, stdout=out, stderr=""))
+                            lambda *_a, **_k: subprocess.CompletedProcess([], code, stdout=out, stderr=""))
 
     status("Logged in using ChatGPT\n", 0)
     assert codex_logged_in() is True
@@ -49,5 +51,41 @@ def test_login_status_reads_signed_in_signed_out_and_unknown(monkeypatch):
     # A crash or garbled answer is not a logout: the turn runs and a real 401 opens Log in.
     status("", 1)
     assert codex_logged_in() is None
-    monkeypatch.setattr(codex_auth, "_codex", lambda *_a: None)
+    monkeypatch.setattr(codex_auth, "_codex", lambda *_a, **_k: None)
     assert codex_logged_in() is None
+
+
+def test_extra_account_runs_codex_in_its_own_codex_home(monkeypatch, tmp_path):
+    home = str(tmp_path / "accounts" / "codex" / "team")
+    assert codex_auth.account_env(home) == {"CODEX_HOME": home}
+    assert codex_auth.account_env("") == {}
+    seen = []
+    monkeypatch.setattr(codex_auth.subprocess, "run", lambda argv, **kw: (
+        seen.append(kw["env"]), subprocess.CompletedProcess(argv, 0, stdout="Logged in using ChatGPT", stderr=""))[1])
+    fake_bin = mock.Mock(resolve_bin=lambda _p: "codex")
+    with mock.patch.dict(sys.modules, {"fakecodexpkg": mock.Mock(), "fakecodexpkg.cli_update": fake_bin}):
+        monkeypatch.setattr(codex_auth, "__package__", "fakecodexpkg")
+        assert codex_auth.account_status(home) == {"loggedIn": True}
+        assert codex_auth.codex_logged_in() is True
+        login = codex_auth.account_login(home)
+    assert seen[0]["CODEX_HOME"] == home
+    assert seen[1] is None  # the default account keeps Codex's own folder
+    assert login == {"argv": ["codex", "login", "--device-auth"], "env": {"CODEX_HOME": home}}
+
+
+def test_limit_and_quota_errors():
+    assert codex_auth.is_limit_error("You've hit your usage limit. Try again in 3 hours.")
+    assert codex_auth.is_limit_error('{"type":"usage_limit_reached"}')
+    assert not codex_auth.is_limit_error("file not found")
+    assert codex_auth.is_quota_error("Error code: 429 - insufficient_quota")
+    assert not codex_auth.is_quota_error("invalid api key")
+
+
+def test_registration_carries_account_hooks():
+    # register() passes **ACCOUNT_HOOKS to register_coding_agent("codex", ...).
+    agent = codex_auth.ACCOUNT_HOOKS
+    assert agent["account_env"]("X") == {"CODEX_HOME": "X"}
+    for hook in ("account_login", "account_status", "account_logout", "account_usage", "is_limit_error"):
+        assert callable(agent[hook])
+    assert "config.toml" in agent["account_shared"]["files"]
+    assert "auth.json" not in agent["account_shared"]["files"]
