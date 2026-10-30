@@ -724,6 +724,86 @@ def test_a_real_error_is_not_retried(launch_env):
     assert not result.ok
 
 
+def _fake_accounts(monkeypatch, homes):
+    """Core's accounts: the running login, then the next in ``homes`` after a report_limit."""
+    fake = types.SimpleNamespace(running=0, reports=[])
+    fake.current_account = lambda _agent: f"acct{fake.running}"
+    fake.report_limit = lambda _agent, account, reset_at: fake.reports.append((account, reset_at))
+
+    def next_env(_agent):
+        fake.running = min(fake.running + 1, len(homes) - 1)
+        return {"CODEX_HOME": homes[fake.running]} if homes[fake.running] else {}
+
+    fake.coding_agent_account_env = next_env
+    import backend.agent
+
+    monkeypatch.setattr(backend.agent, "accounts", fake, raising=False)
+    monkeypatch.setitem(sys.modules, "backend.agent.accounts", fake)
+    return fake
+
+
+def _limit_run(calls, *, work_first=False):
+    def run(**call):
+        calls.append(call)
+        call["on_line"](json.dumps({"type": "thread.started", "thread_id": "thread-one"}))
+        if len(calls) == 1:
+            if work_first:
+                call["on_line"](json.dumps({"type": "item.completed", "item": {
+                    "id": "half", "type": "agent_message", "text": "Edited two files",
+                }}))
+            call["on_line"](json.dumps({"type": "error", "message": (
+                "You've hit your usage limit. Upgrade to Pro or try again in 2 hours 5 minutes.")}))
+            return types.SimpleNamespace(cancelled=False, timed_out=False, returncode=1,
+                                         stderr_tail="", raw_tail="")
+        call["on_line"](json.dumps({"type": "item.completed", "item": {
+            "id": "reply", "type": "agent_message", "text": "Done on Work",
+        }}))
+        return types.SimpleNamespace(cancelled=False, timed_out=False, returncode=0,
+                                     stderr_tail="", raw_tail="")
+
+    return run
+
+
+def test_a_usage_limit_replays_the_turn_once_on_the_next_account(launch_env, monkeypatch, tmp_path):
+    adapter, updater, kwargs, calls, events = launch_env
+    personal, work = str(tmp_path / "personal"), str(tmp_path / "work")
+    fake = _fake_accounts(monkeypatch, [personal, work])
+    adapter.run_streaming_process.side_effect = _limit_run(calls)
+    result = adapter.CodexAdapter().launch(**{**kwargs, "env": {"CODEX_HOME": personal}}, mode="agent")
+    assert result.ok, result.error
+    assert "Done on Work" in (result.reply_text or "")
+    assert [c["env_extra"]["CODEX_HOME"] for c in calls] == [personal, work]
+    assert fake.reports[0][0] == "acct0" and fake.reports[0][1] > 0
+    assert any("usage limit" in str(e.get("text", "")) for e in events if isinstance(e, dict))
+
+
+def test_a_usage_limit_after_work_is_not_replayed(launch_env, monkeypatch, tmp_path):
+    adapter, updater, kwargs, calls, events = launch_env
+    fake = _fake_accounts(monkeypatch, ["", str(tmp_path / "work")])
+    adapter.run_streaming_process.side_effect = _limit_run(calls, work_first=True)
+    result = adapter.CodexAdapter().launch(**kwargs, mode="agent")
+    assert adapter.run_streaming_process.call_count == 1
+    assert not result.ok and not fake.reports
+
+
+def test_a_usage_limit_with_no_other_account_is_not_replayed(launch_env, monkeypatch):
+    adapter, updater, kwargs, calls, events = launch_env
+    _fake_accounts(monkeypatch, [""])  # only the default login
+    adapter.run_streaming_process.side_effect = _limit_run(calls)
+    result = adapter.CodexAdapter().launch(**kwargs, mode="agent")
+    assert adapter.run_streaming_process.call_count == 1
+    assert not result.ok
+
+
+def test_limit_reset_reads_codex_wording(launch_env):
+    import time as _time
+
+    adapter = launch_env[0]
+    got = adapter.limit_reset_at("try again in 2 hours 5 minutes.")
+    assert abs(got - (_time.time() + 7500)) < 5
+    assert adapter.limit_reset_at("try again later") is None
+
+
 def _silent_run(calls, reply=""):
     """A Codex process that prints its thread id and then nothing until it is stopped."""
 

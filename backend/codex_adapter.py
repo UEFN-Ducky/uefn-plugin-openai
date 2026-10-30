@@ -1389,6 +1389,39 @@ class _CodexStream:
         self._items.clear()
 
 
+_RESET_IN_RE = re.compile(r"try again in\s+([\d\s,a-z]+)", re.I)
+_UNIT_S = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+
+
+def limit_reset_at(text: str) -> float | None:
+    """When a plan limit lifts, from Codex's "try again in 2 hours 5 minutes" (None: unknown)."""
+    m = _RESET_IN_RE.search(text or "")
+    if not m:
+        return None
+    secs = sum(int(n) * _UNIT_S[u[0].lower()] for n, u in re.findall(r"(\d+)\s*([dhms])[a-z]*", m.group(1), re.I))
+    return time.time() + secs if secs else None
+
+
+def _did_work(state: _CodexStream) -> bool:
+    """The turn already replied or ran a tool: replaying it could do that twice."""
+    return bool("".join(state.text_parts).strip()) or any(b.get("type") != "thinking" for b in state.blocks)
+
+
+def _next_account_env(env: dict[str, str], reset_at: float | None) -> dict[str, str] | None:
+    """The running login hit its plan limit: mark it full; launch env for the next one, or None."""
+    try:
+        from backend.agent import accounts
+
+        full = accounts.current_account("codex")
+        accounts.report_limit("codex", full, reset_at)
+        nxt = accounts.coding_agent_account_env("codex")
+        if accounts.current_account("codex") == full:
+            return None  # auto-switch off, or every login is full
+    except Exception:
+        return None  # a core without accounts
+    return {**{k: v for k, v in env.items() if k != "CODEX_HOME"}, **nxt}
+
+
 def _finish_codex_turn(proc: Any, state: _CodexStream, *, session_id: str, timeout_s: float) -> CodingAgentLaunchResult:
     """One Codex run's result. Whatever ended the turn, open tool chips are resolved."""
     state.finish_unresolved_tools(cancelled=proc.cancelled)
@@ -1764,6 +1797,20 @@ class CodexAdapter:
                     f"Codex printed nothing for {silent_minutes} minutes twice in a row, so Ducky "
                     "stopped the turn. Send the message again to continue on the same thread."
                 )
+                return with_mode(result)
+        from .codex_auth import is_limit_error
+
+        limit_text = "\n".join(str(t or "") for t in (result.error, state.error_text, proc.stderr_tail))
+        if not result.ok and is_limit_error(limit_text) and not _did_work(state):
+            switched = _next_account_env(env, limit_reset_at(limit_text))
+            if switched is not None:
+                # Same turn, next login. Accounts share CODEX_HOME/sessions, so the thread resumes.
+                push({"type": "status", "text": "Codex hit this account's usage limit — continuing on the next account…",
+                      "conv_id": conv_id, "run_id": run_id})
+                env = switched
+                state = _CodexStream(conv_id, run_id, push)
+                proc, stalled = run_codex(argv, state)
+                result = _finish_codex_turn(proc, state, session_id=session_id, timeout_s=timeout_s)
                 return with_mode(result)
         if result.ok or not should_heal_launch(
             result.error or "",

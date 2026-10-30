@@ -158,10 +158,11 @@ def logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
 
 
 # Extra accounts: core keeps the list and the folder; each Codex login lives in its own CODEX_HOME.
-# Shared with ~/.codex so every account keeps the person's settings, prompts and skills; auth.json,
-# sessions and history stay per account. Ducky's MCP server rides each launch as a `-c` override,
-# so a shared config.toml never outranks it.
-ACCOUNT_SHARED = {"dirs": ["prompts", "skills"], "files": ["config.toml", "AGENTS.md"]}
+# Shared with ~/.codex so every account keeps the person's settings, prompts, skills and threads
+# (a turn that hits one login's limit resumes on the next); auth.json stays per account. Ducky's
+# MCP server rides each launch as a `-c` override, so a shared config.toml never outranks it.
+ACCOUNT_SHARED = {"dirs": ["prompts", "skills", "sessions"], "files": ["config.toml", "AGENTS.md"],
+                  "primary": lambda: os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")}
 _LIMIT_RE = re.compile(r"usage[ _]limit|usage_limit_reached|rate_limit_exceeded|hit your (usage )?limit"
                        r"|too many requests|\b429\b", re.I)
 _QUOTA_RE = re.compile(r"\b429\b|rate[ _]limit|insufficient_quota|quota|too many requests", re.I)
@@ -178,7 +179,8 @@ def account_login(config_dir: str, *, cli_path: str = "", **_kw: Any) -> dict[st
     binary = resolve_bin(cli_path)
     if not binary:
         return {"ok": False, "error": "Codex CLI not found. Press Detect on the Codex row, then Log in again."}
-    os.makedirs(config_dir, exist_ok=True)
+    if config_dir:
+        os.makedirs(config_dir, exist_ok=True)
     return {"argv": [binary, "login", "--device-auth"], "env": account_env(config_dir)}
 
 
