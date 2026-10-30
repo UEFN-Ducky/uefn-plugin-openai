@@ -86,7 +86,7 @@ def _heal_default_model_if_codex_only() -> None:
 
 
 def register(api) -> None:
-    from . import codex_auth, usage
+    from . import codex_auth
     from .codex_adapter import CodexAdapter
     from .openai_provider import OpenAIProvider
 
@@ -126,13 +126,7 @@ def register(api) -> None:
         login_cancel=codex_auth.cancel_login,
         logout=codex_auth.logout,
         login_status_ok="logged in",
-        account_env=codex_auth.account_env,
-        account_login=codex_auth.account_login,
-        account_status=codex_auth.account_status,
-        account_logout=codex_auth.account_logout,
-        account_shared=codex_auth.ACCOUNT_SHARED,
-        account_usage=usage.account_usage,
-        is_limit_error=codex_auth.is_limit_error,
+        **codex_auth.ACCOUNT_HOOKS,
         shows_thinking_effort=True,
         # Codex works through Ducky's tools only, so Ducky's approval modes apply to it:
         # Ducky asks before its file changes (Ask before changes) and its terminal commands.

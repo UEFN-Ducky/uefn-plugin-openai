@@ -203,6 +203,20 @@ def is_quota_error(text: str) -> bool:
     return bool(_QUOTA_RE.search(text or ""))
 
 
+def account_usage(config_dir: str, **kw: Any) -> list[dict[str, Any]]:
+    from .usage import account_usage as usage
+
+    return usage(config_dir, **kw)
+
+
+# register_coding_agent("codex", **ACCOUNT_HOOKS): core's per-account login, status and limits.
+ACCOUNT_HOOKS: dict[str, Any] = {
+    "account_env": account_env, "account_login": account_login, "account_status": account_status,
+    "account_logout": account_logout, "account_shared": ACCOUNT_SHARED, "account_usage": account_usage,
+    "is_limit_error": is_limit_error,
+}
+
+
 def login_message(push: Any) -> str:
     """A chat turn whose Codex is signed out: point to Settings and spotlight Log in."""
     if push:

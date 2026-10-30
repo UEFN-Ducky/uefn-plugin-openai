@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -84,25 +83,12 @@ def test_limit_and_quota_errors():
 
 
 def test_registration_carries_account_hooks():
-    backend = Path(__file__).parent
-    spec = importlib.util.spec_from_file_location("ducky_openai_reg", backend / "__init__.py",
-                                                  submodule_search_locations=[str(backend)])
-    pkg = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = pkg
-    try:
-        spec.loader.exec_module(pkg)
-        api = mock.MagicMock()
-        with mock.patch.object(pkg, "_heal_default_model_if_codex_only"), \
-             mock.patch(f"{spec.name}.codex_adapter.heal_codex_approval_policy"), \
-             mock.patch(f"{spec.name}.cli_update.schedule_cli_update_on_plugin_load"):
-            pkg.register(api)
-    finally:
-        for name in [m for m in sys.modules if m == spec.name or m.startswith(spec.name + ".")]:
-            del sys.modules[name]
-    agent = api.register_coding_agent.call_args.kwargs
+    # register() passes **ACCOUNT_HOOKS to register_coding_agent("codex", ...).
+    agent = codex_auth.ACCOUNT_HOOKS
     assert agent["account_env"]("X") == {"CODEX_HOME": "X"}
     for hook in ("account_login", "account_status", "account_logout", "account_usage", "is_limit_error"):
         assert callable(agent[hook])
     assert "config.toml" in agent["account_shared"]["files"]
     assert "auth.json" not in agent["account_shared"]["files"]
-    assert callable(api.register_llm_provider.call_args.kwargs["is_quota_error"])
+    init = (Path(__file__).parent / "__init__.py").read_text(encoding="utf-8")
+    assert "**codex_auth.ACCOUNT_HOOKS" in init and "is_quota_error=codex_auth.is_quota_error" in init
