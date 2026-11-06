@@ -140,7 +140,7 @@ def test_default_home_and_healer_respect_selected_home(launch_env, tmp_path, mon
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
     config = home / "config.toml"
-    config.write_text('approval_policy = "never"\n', encoding="utf-8")
+    config.write_text('# BEGIN UEFN-DUCKY\napproval_policy = "never"\n# END UEFN-DUCKY\n', encoding="utf-8")
     assert adapter.heal_codex_approval_policy()
-    assert tomllib.loads(config.read_text(encoding="utf-8"))["approval_policy"] == "on-failure"
+    assert "approval_policy" not in tomllib.loads(config.read_text(encoding="utf-8"))
     assert adapter._codex_catalog_path() == home / "models_cache.json"

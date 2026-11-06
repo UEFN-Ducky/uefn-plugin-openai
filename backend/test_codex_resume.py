@@ -266,6 +266,7 @@ def test_writes_codex_profile_from_ducky_mcp(tmp_path: Path):
     assert "node_repl" in cfg
     assert "BEGIN UEFN-DUCKY" in cfg
     assert "mcp_servers.uefn" in cfg
+    assert "approval_policy" not in cfg  # the person's own Codex setting
     write_codex_uefn_profile(str(mcp), codex_home=home)
     assert (home / "config.toml").read_text(encoding="utf-8").count("BEGIN UEFN-DUCKY") == 1
     first = build_codex_argv(
@@ -400,8 +401,10 @@ def test_heal_strips_unmarked_uefn_on_plugin_load(tmp_path: Path):
     assert "node_repl" in cfg
 
 
-def test_heal_codex_approval_inserts_without_wiping_mcp(tmp_path: Path):
+def test_heal_never_adds_approval_or_creates_config(tmp_path: Path):
     home = tmp_path / "codex-home-insert"
+    assert heal_codex_approval_policy(codex_home=home) is False
+    assert not home.exists()
     home.mkdir()
     (home / "config.toml").write_text(
         '# BEGIN UEFN-DUCKY\n[mcp_servers.uefn]\ncommand = "x"\n# END UEFN-DUCKY\n',
@@ -409,7 +412,7 @@ def test_heal_codex_approval_inserts_without_wiping_mcp(tmp_path: Path):
     )
     assert heal_codex_approval_policy(codex_home=home) is True
     text = (home / "config.toml").read_text(encoding="utf-8")
-    assert 'approval_policy = "on-failure"' in text
+    assert "approval_policy" not in text
     assert "[mcp_servers.uefn]" in text
     assert 'command = "x"' in text
     assert 'default_tools_approval_mode = "approve"' in text
@@ -429,13 +432,26 @@ def test_heal_codex_approval_rewrites_never(tmp_path: Path):
     )
     assert heal_codex_approval_policy(codex_home=home) is True
     healed = (home / "config.toml").read_text(encoding="utf-8")
-    assert 'approval_policy = "on-failure"' in healed
-    assert 'approval_policy = "never"' not in healed
+    assert "approval_policy" not in healed
     assert 'default_tools_approval_mode = "approve"' in healed
     assert 'default_tools_approval_mode = "auto"' not in healed
     assert 'approval_policy = "on-failure"' in (
         home / "ducky-uefn.config.toml"
     ).read_text(encoding="utf-8")
+
+
+def test_heal_drops_approval_only_block_and_keeps_persons_own_setting(tmp_path: Path):
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        'approval_policy = "never"\nmodel = "gpt-5"\n\n'
+        '# BEGIN UEFN-DUCKY\napproval_policy = "on-failure"\n# END UEFN-DUCKY\n',
+        encoding="utf-8",
+    )
+    assert heal_codex_approval_policy(codex_home=home) is True
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    assert text == 'approval_policy = "never"\nmodel = "gpt-5"\n'
+    assert heal_codex_approval_policy(codex_home=home) is False
 
 
 if __name__ == "__main__":
