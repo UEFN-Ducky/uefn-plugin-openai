@@ -123,6 +123,16 @@
       ]
     },
     "automations": {
+      "image_generators": [
+        {
+          "id": "codex_image",
+          "label": "Codex · ChatGPT image",
+          "tool": "codex_image",
+          "credits": 0,
+          "cost": "Free with your ChatGPT sign-in (Codex limits)",
+          "image_arg": "image"
+        }
+      ],
       "nodes": [
         {
           "id": "openai.complete",

@@ -150,6 +150,9 @@ def register(api) -> None:
     except Exception:
         pass
     from . import graph_nodes
+    from .codex_images import TOOL as CODEX_IMAGE_TOOL, codex_image
 
     graph_nodes.register_nodes(api)
+    # Text to Image / ducky_generate_image: Codex's own image tool on the ChatGPT sign-in.
+    api.tool(codex_image, name=CODEX_IMAGE_TOOL, listener=False)
     api.log("OpenAI gateway contribution active (Providers + Codex + IDE)")
