@@ -83,6 +83,12 @@ def _commit_message(root: Path, changelog: str) -> str:
     return "Commit working tree before UEFN Ducky Store publish."
 
 
+def push_refspec(branch: str) -> list[str]:
+    """What to push: the branch it's on, or ``main`` from a detached HEAD (a release worktree),
+    where git can't guess a destination for ``HEAD``. Pure."""
+    return ["-u", "origin", "HEAD"] if branch else ["origin", "HEAD:refs/heads/main"]
+
+
 def commit_and_push_before_publish(root: Path, changelog: str = "") -> None:
     """Add/commit/push every shippable file. Abort if anything real stays dirty."""
     root = root.resolve()
@@ -112,7 +118,8 @@ def commit_and_push_before_publish(root: Path, changelog: str = "") -> None:
 
     remote = _git(root, "remote", check=False).stdout.split()
     if "origin" in remote:
-        push = _git(root, "push", "-u", "origin", "HEAD", check=False)
+        branch = _git(root, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
+        push = _git(root, "push", *push_refspec(branch), check=False)
         if push.returncode != 0:
             raise SystemExit(push.stderr or push.stdout or "git push failed")
         print("pushed HEAD to origin before Store publish")
@@ -128,6 +135,9 @@ def _self_check() -> None:
     assert not skip_store_commit_path("plugin.json")
     assert not skip_store_commit_path("scripts/release.py")
     assert not skip_store_commit_path("backend/__init__.py")
+    # A release worktree is on a detached HEAD: it pushes to main, never a bare HEAD.
+    assert push_refspec("") == ["origin", "HEAD:refs/heads/main"]
+    assert push_refspec("main") == ["-u", "origin", "HEAD"]
     print("commit_before_store self-check ok")
 
 
