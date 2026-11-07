@@ -194,7 +194,7 @@ def _responses_usage(usage: Any) -> dict[str, int]:
     }
 
 
-def replay_reasoning_field() -> str:
+def replay_reasoning_field(base_url: str = "") -> str:
     """Chat Completions field that carries a prior step's reasoning back, or "".
 
     api.openai.com has no such field: its chat models never return reasoning, and a
@@ -203,23 +203,29 @@ def replay_reasoning_field() -> str:
     …) takes ``reasoning_content``: DeepSeek's thinking mode requires it back on every
     request that carries tools (400 otherwise), and a reasoning model that never sees
     its own earlier reasoning re-derives the same analysis on every tool step.
+    ``base_url``: the key's own endpoint (Settings → API keys), ahead of the env var.
     """
-    base = (os.environ.get("OPENAI_BASE_URL") or "").strip().lower()
+    base = (base_url or os.environ.get("OPENAI_BASE_URL") or "").strip().lower()
     if not base or "api.openai.com" in base:
         return ""
     return "reasoning_content"
 
 
 class OpenAIProvider:
-    def __init__(self, api_key: str, model: str, *, thinking_effort: str = "off", **_kw: Any) -> None:
+    def __init__(
+        self, api_key: str, model: str, *, thinking_effort: str = "off", base_url: str = "", **_kw: Any
+    ) -> None:
         self._api_key = api_key
         self._model = model
         self._thinking_effort = normalize_thinking_effort(thinking_effort)
-        self._reasoning_field = replay_reasoning_field()
+        self._base_url = (base_url or "").strip()  # the key's proxy / self-hosted endpoint
+        self._reasoning_field = replay_reasoning_field(self._base_url)
 
     def _client(self):
         from openai import OpenAI
 
+        if self._base_url:
+            return OpenAI(api_key=self._api_key, base_url=self._base_url)
         return OpenAI(api_key=self._api_key)
 
     def _to_openai_messages(

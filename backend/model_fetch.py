@@ -75,8 +75,9 @@ def clear_model_cache() -> None:
     _DOCS_SPEC_CACHE.clear()
 
 
-def fetch_models(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
-    return _fetch_openai(api_key, verify=verify)
+def fetch_models(api_key: str, *, verify: bool = False, base_url: str = "") -> list[ModelInfo]:
+    """``base_url``: the key's own endpoint (a proxy or OpenAI-compatible server)."""
+    return _fetch_openai(api_key, verify=verify, base_url=base_url)
 
 
 def cached_models(api_key: str) -> list[ModelInfo] | None:
@@ -396,23 +397,25 @@ def _openai_chat_completions_ok(client, model_id: str) -> bool:
         return True
 
 
-def _fetch_openai(api_key: str, *, verify: bool = False) -> list[ModelInfo]:
+def _fetch_openai(api_key: str, *, verify: bool = False, base_url: str = "") -> list[ModelInfo]:
     from openai import OpenAI
 
-    cache_key = _key_hash(api_key or "")
+    base_url = (base_url or "").strip()
+    cache_key = _key_hash(f"{api_key or ''}|{base_url}")
     if not verify:
         hit = _OPENAI_LIST_CACHE.get(cache_key)
         if hit is not None and (time.time() - hit[0]) < _LIST_TTL_S:
             return list(hit[1])
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
     listed_ids: list[str] = []
     for m in client.models.list():
         mid = (m.id or "").strip()
         if mid:
             listed_ids.append(mid)
 
-    dashboard = _fetch_openai_dashboard(api_key)
+    # Another endpoint's key never goes to api.openai.com's dashboard.
+    dashboard = {} if base_url and "api.openai.com" not in base_url.lower() else _fetch_openai_dashboard(api_key)
     pricing_catalog = _pricing_catalog()
     models: list[ModelInfo] = []
     seen: set[str] = set()
