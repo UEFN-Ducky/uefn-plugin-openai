@@ -255,13 +255,27 @@ def _npm_install() -> dict[str, Any]:
     return {"ok": True}
 
 
+def powershell_exe() -> str:
+    """Windows PowerShell by its full path: a bare "powershell" is only found through PATH,
+    and on PCs where that is broken the install failed "[WinError 2] The system cannot find
+    the file specified". Then PowerShell 7 (pwsh), then the bare name."""
+    import shutil
+
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    for exe in (Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+                Path(root) / "Sysnative" / "WindowsPowerShell" / "v1.0" / "powershell.exe"):
+        if exe.is_file():
+            return str(exe)
+    return shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+
+
 def _ps_install() -> dict[str, Any]:
     if os.name != "nt":
         return {"ok": False, "error": "no PowerShell installer"}
     ps = f"Set-ExecutionPolicy -Scope Process Bypass -Force; {_INSTALL_PS}"
     try:
         proc = _run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            [powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             timeout_s=300,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

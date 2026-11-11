@@ -28,6 +28,21 @@ from cli_update import (
 )
 
 
+def test_installer_finds_powershell_without_path(tmp_path, monkeypatch):
+    """'[WinError 2] The system cannot find the file specified' when PATH lacks PowerShell."""
+    exe = tmp_path / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    assert cli_update.powershell_exe() == str(exe)
+    ran = []
+    monkeypatch.setattr(cli_update, "_run", lambda argv, **kw: ran.append(argv) or types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(cli_update.os, "name", "nt")
+    assert cli_update._ps_install() == {"ok": True}
+    assert ran[0][0] == str(exe)
+
+
 def test_parse_and_heal():
     assert parse_version_tuple("codex-cli 0.42.0") == (0, 42, 0)
     assert is_cli_too_old_error(
