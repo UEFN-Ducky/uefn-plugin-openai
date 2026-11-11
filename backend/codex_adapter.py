@@ -720,6 +720,52 @@ def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
+# The person's own URL server named "uefn" (e.g. Epic's UEFN MCP) moves here: Codex merges
+# config layers, so Ducky's per-run `mcp_servers.uefn={command=...}` landed on top of their
+# `url` and every launch failed "url is not supported for stdio | in mcp_servers.uefn".
+FOREIGN_UEFN_NAME = "uefn_editor"
+
+
+def _rename_foreign_uefn(text: str) -> str:
+    """``text`` with an unmarked URL-based [mcp_servers.uefn] (and its sub-tables) renamed to
+    FOREIGN_UEFN_NAME; unchanged when it isn't URL-based or isn't there."""
+    outside, block = _split_marked_toml(text)
+    try:
+        row = (tomllib.loads(outside).get("mcp_servers") or {}).get("uefn")
+    except (ValueError, AttributeError):
+        return text
+    if not isinstance(row, dict) or not isinstance(row.get("url"), str) or row.get("command"):
+        return text
+    out: list[str] = []
+    for line in outside.splitlines(keepends=True):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            name = s[1:-1].strip()
+            if name.lower() == "mcp_servers.uefn" or name.lower().startswith("mcp_servers.uefn."):
+                line = line.replace(name, f"mcp_servers.{FOREIGN_UEFN_NAME}" + name[len("mcp_servers.uefn"):], 1)
+        out.append(line)
+    moved = "".join(out)
+    return _join_marked_toml(moved, block) if block else moved
+
+
+def move_foreign_uefn(*, codex_home: Path | None = None) -> bool:
+    """Rename the person's URL-based "uefn" server in config.toml so Ducky's stdio "uefn"
+    can start. Their server keeps working under FOREIGN_UEFN_NAME. True if changed."""
+    cfg = (Path(codex_home) if codex_home else _codex_home()) / "config.toml"
+    try:
+        text = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
+    except OSError:
+        return False
+    new = _rename_foreign_uefn(text)
+    if new == text:
+        return False
+    try:
+        _atomic_write_text(cfg, new)
+    except OSError:
+        return False
+    return True
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Readers see the old complete file or the new complete file."""
     temporary = None
@@ -1613,6 +1659,10 @@ class CodexAdapter:
             update_cli,
         )
 
+        try:
+            move_foreign_uefn()  # their URL "uefn" would merge into ours and stop every launch
+        except Exception:
+            pass
         try:
             profile_ready = write_codex_uefn_profile(mcp_config_path, per_run=True)
         except Exception:
