@@ -141,10 +141,16 @@ def _wham(token: str, account: str) -> list[dict[str, Any]]:
         return []
 
 
-def account_usage(config_dir: str, **_kw: Any) -> list[dict[str, Any]]:
-    """Plan windows of one Codex login (its CODEX_HOME)."""
+LOGIN_NOTICE = {"message": "Log in to see usage.", "action": "login"}
+
+
+def account_usage(config_dir: str, **_kw: Any) -> list[dict[str, Any]] | dict[str, Any]:
+    """Plan windows of one Codex login (its CODEX_HOME). Signed out: a login notice, which
+    core caches in place of the old bars (an empty list let it keep showing them)."""
     token, account = _codex_auth(config_dir)
-    return _wham(token, account) if token else []
+    if not token:
+        return {"windows": [], "notice": dict(LOGIN_NOTICE)}
+    return _wham(token, account)
 
 
 def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:

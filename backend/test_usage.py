@@ -11,7 +11,8 @@ def test_account_usage_reads_that_accounts_login(tmp_path, monkeypatch) -> None:
                                         encoding="utf-8")
     monkeypatch.setattr(usage, "_wham", lambda token, account: [{"id": "hourly", "token": token, "account": account}])
     assert usage.account_usage(str(tmp_path)) == [{"id": "hourly", "token": "work-tok", "account": "a1"}]
-    assert usage.account_usage(str(tmp_path / "signed-out")) == []
+    # Signed out: a login notice, so core drops the old bars instead of keeping them.
+    assert usage.account_usage(str(tmp_path / "signed-out")) == {"windows": [], "notice": usage.LOGIN_NOTICE}
 
 
 def test_wham_five_hour_and_weekly() -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
+from pathlib import Path
 from unittest import mock
 
 import codex_auth
@@ -79,6 +81,76 @@ def test_limit_and_quota_errors():
     assert not codex_auth.is_limit_error("file not found")
     assert codex_auth.is_quota_error("Error code: 429 - insufficient_quota")
     assert not codex_auth.is_quota_error("invalid api key")
+
+
+class _FakeProc:
+    def __init__(self, auth=None, code=0, out=""):
+        self._auth, self._code, self.returncode = auth, code, None
+        self.stdout = iter([out]) if out else None
+        self.started = time.monotonic()
+
+    def poll(self):
+        if self.returncode is None and time.monotonic() - self.started > 0.2:
+            if self._auth is not None:
+                self._auth.write_text("{}", encoding="utf-8")
+            self.returncode = self._code
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+def _fake_pkg(binary):
+    return mock.patch.dict(sys.modules, {"fakecodexpkg": mock.Mock(), "fakecodexpkg.cli_update": mock.Mock(
+        resolve_bin=lambda _p: binary, hidden_run_kwargs=lambda: {}, update_cli=lambda _o: {"ok": True})})
+
+
+def _wait_done(home):
+    for _ in range(100):
+        if not codex_auth.account_status(home).get("pending"):
+            return
+        time.sleep(0.05)
+
+
+def test_one_click_login_runs_hidden_codex_login_and_reports_signed_in(monkeypatch, tmp_path):
+    home = tmp_path / "acct"
+    seen = []
+    monkeypatch.setattr(codex_auth, "__package__", "fakecodexpkg")
+    monkeypatch.setattr(codex_auth, "codex_logged_in", lambda _c="", home="": (Path(home) / "auth.json").is_file())
+    with _fake_pkg("codex"):
+        out = codex_auth.account_browser_login(
+            str(home), poll_s=0.02,
+            popen=lambda argv, **kw: seen.append((argv, kw["env"].get("CODEX_HOME"))) or _FakeProc(home / "auth.json"))
+        assert out == {"message": codex_auth.BROWSER_WAITING}
+        assert codex_auth.account_status(str(home)) == {"loggedIn": False, "pending": True}
+        _wait_done(str(home))
+        assert codex_auth.account_status(str(home)) == {"loggedIn": True}
+    assert seen == [(["codex", "login"], str(home))]  # browser login, not --device-auth
+
+
+def test_one_click_login_cancelled_says_why(monkeypatch, tmp_path):
+    home = tmp_path / "acct2"
+    monkeypatch.setattr(codex_auth, "__package__", "fakecodexpkg")
+    monkeypatch.setattr(codex_auth, "codex_logged_in", lambda *_a, **_k: False)
+    with _fake_pkg("codex"):
+        codex_auth.account_browser_login(str(home), poll_s=0.02,
+                                         popen=lambda *_a, **_k: _FakeProc(None, 1, "Error: login cancelled\n"))
+        _wait_done(str(home))
+        st = codex_auth.account_status(str(home))
+    assert st["loggedIn"] is False and st["error"].startswith(codex_auth.BROWSER_NOT_FINISHED)
+    assert "login cancelled" in st["error"]
+
+
+def test_one_click_login_installs_missing_codex_first(monkeypatch):
+    monkeypatch.setattr(codex_auth, "__package__", "fakecodexpkg")
+    monkeypatch.setitem(codex_auth._INSTALL, "busy", False)
+    started = []
+    monkeypatch.setattr(codex_auth.threading, "Thread", lambda target, **_k: mock.Mock(start=lambda: started.append(target)))
+    with _fake_pkg(""):
+        assert codex_auth.account_browser_login("X") == {"error": codex_auth.INSTALLING_CODEX}
+        assert codex_auth.account_status("X") == {"loggedIn": False, "pending": True, "installing": True}
+        started[0]()  # the install finishes
+    assert codex_auth._INSTALL == {"busy": False, "error": ""}
 
 
 def test_registration_carries_account_hooks():

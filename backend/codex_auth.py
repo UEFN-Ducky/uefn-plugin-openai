@@ -10,8 +10,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 SETTINGS_LOGIN_HREF = "ducky://settings.llms/openai#login"
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x07")
@@ -184,8 +186,109 @@ def account_login(config_dir: str, *, cli_path: str = "", **_kw: Any) -> dict[st
     return {"argv": [binary, "login", "--device-auth"], "env": account_env(config_dir)}
 
 
-def account_status(config_dir: str, *, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
-    return {"loggedIn": bool(codex_logged_in(cli_path, home=config_dir))}
+# One-click sign-in (Settings' Log in): a hidden `codex login` opens ChatGPT's sign-in in the
+# default browser and waits on its localhost callback; the row polls account_status until
+# auth.json lands. No terminal tab, no code to copy. Missing Codex installs first.
+BROWSER_LOGIN_S = 300.0
+BROWSER_WAITING = "Sign in to ChatGPT in the browser tab that just opened…"
+BROWSER_NOT_FINISHED = "Sign-in didn't finish, try again."
+INSTALLING_CODEX = "Codex isn't installed yet. Ducky is installing it; sign-in starts by itself."
+# ponytail: one hidden sign-in per CODEX_HOME in this process; a second Log in replaces it.
+_BROWSER_LOCK = threading.Lock()
+_BROWSER: dict[str, dict[str, Any]] = {}  # normcased CODEX_HOME -> {proc, pending, error}
+_INSTALL: dict[str, Any] = {"busy": False, "error": ""}
+
+
+def _codex_home(config_dir: str | None) -> Path:
+    return Path(config_dir) if config_dir else Path(ACCOUNT_SHARED["primary"]())
+
+
+def _install_codex() -> None:
+    from .cli_update import update_cli
+
+    def run() -> None:
+        try:
+            res = update_cli("")
+            _INSTALL["error"] = "" if res.get("ok") else str(res.get("error") or "Codex install failed")
+        except Exception as exc:  # never leave the row spinning
+            _INSTALL["error"] = f"Codex install failed: {exc}"
+        finally:
+            _INSTALL["busy"] = False
+
+    if _INSTALL["busy"]:
+        return
+    _INSTALL.update(busy=True, error="")  # before the thread: the row's first poll sees it
+    threading.Thread(target=run, name="codex-install", daemon=True).start()
+
+
+def _stop(proc: Any) -> None:
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except Exception:
+        pass
+
+
+def account_browser_login(config_dir: str | None, *, cli_path: str = "", popen: Callable[..., Any] = subprocess.Popen,
+                          timeout_s: float = BROWSER_LOGIN_S, poll_s: float = 0.5, **_kw: Any) -> dict[str, Any]:
+    """Start the hidden browser sign-in for this account (``None`` = Codex's own home)."""
+    from .cli_update import hidden_run_kwargs, resolve_bin
+
+    binary = resolve_bin(cli_path)
+    if not binary:
+        _install_codex()
+        return {"error": INSTALLING_CODEX}
+    home = _codex_home(config_dir)
+    home.mkdir(parents=True, exist_ok=True)
+    key = os.path.normcase(str(home))
+    with _BROWSER_LOCK:
+        old = _BROWSER.pop(key, None)
+    if old:
+        _stop(old["proc"])  # it holds the localhost callback port
+    env = {**os.environ, **account_env(str(config_dir or ""))}
+    try:
+        proc = popen([binary, "login"], env=env, cwd=str(home), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                     encoding="utf-8", errors="replace", **hidden_run_kwargs())
+    except OSError as exc:
+        return {"error": f"Could not start Codex: {exc}"}
+    out: list[str] = []
+    if getattr(proc, "stdout", None) is not None:  # drained, or a full pipe stalls the login
+        threading.Thread(target=lambda: out.extend(proc.stdout), name="codex-login-out", daemon=True).start()
+    state = {"proc": proc, "pending": True, "error": "", "out": out}
+    with _BROWSER_LOCK:
+        _BROWSER[key] = state
+    threading.Thread(target=_watch_browser_login, args=(state, home / "auth.json", timeout_s, poll_s),
+                     name="codex-login", daemon=True).start()
+    return {"message": BROWSER_WAITING}
+
+
+def _watch_browser_login(state: dict[str, Any], auth: Path, timeout_s: float, poll_s: float) -> None:
+    proc = state["proc"]
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and proc.poll() is None:
+        time.sleep(poll_s)
+    _stop(proc)  # timed out: free the callback port
+    ok = getattr(proc, "returncode", 1) == 0 and auth.is_file()
+    error = ""
+    if not ok:
+        lines = [ln.strip() for ln in _ANSI_RE.sub("", "".join(state["out"])).splitlines() if "error" in ln.lower()]
+        error = f"{BROWSER_NOT_FINISHED} {lines[-1][:200]}" if lines else BROWSER_NOT_FINISHED
+    with _BROWSER_LOCK:
+        state.update(pending=False, error=error)
+
+
+def account_status(config_dir: str | None, *, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+    if _INSTALL["busy"]:
+        return {"loggedIn": False, "pending": True, "installing": True}
+    with _BROWSER_LOCK:
+        st = dict(_BROWSER.get(os.path.normcase(str(_codex_home(config_dir)))) or {})
+    if st.get("pending"):
+        return {"loggedIn": False, "pending": True}
+    logged_in = bool(codex_logged_in(cli_path, home=str(config_dir or "")))
+    if not logged_in and (st.get("error") or _INSTALL["error"]):
+        return {"loggedIn": False, "error": st.get("error") or _INSTALL["error"]}
+    return {"loggedIn": logged_in}
 
 
 def account_logout(config_dir: str, *, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
@@ -205,7 +308,7 @@ def is_quota_error(text: str) -> bool:
     return bool(_QUOTA_RE.search(text or ""))
 
 
-def account_usage(config_dir: str, **kw: Any) -> list[dict[str, Any]]:
+def account_usage(config_dir: str, **kw: Any) -> list[dict[str, Any]] | dict[str, Any]:
     from .usage import account_usage as usage
 
     return usage(config_dir, **kw)
@@ -214,6 +317,7 @@ def account_usage(config_dir: str, **kw: Any) -> list[dict[str, Any]]:
 # register_coding_agent("codex", **ACCOUNT_HOOKS): core's per-account login, status and limits.
 ACCOUNT_HOOKS: dict[str, Any] = {
     "account_env": account_env, "account_login": account_login, "account_status": account_status,
+    "account_browser_login": account_browser_login,
     "account_logout": account_logout, "account_shared": ACCOUNT_SHARED, "account_usage": account_usage,
     "is_limit_error": is_limit_error,
 }
