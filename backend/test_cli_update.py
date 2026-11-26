@@ -43,6 +43,26 @@ def test_installer_finds_powershell_without_path(tmp_path, monkeypatch):
     assert ran[0][0] == str(exe)
 
 
+def test_darwin_uses_install_sh_and_finds_standalone(tmp_path, monkeypatch):
+    """macOS: OpenAI's install.sh (no npm needed), then the standalone `codex` (no .exe)."""
+    ran = []
+    monkeypatch.setattr(cli_update, "_run", lambda argv, **kw: ran.append(argv) or types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+    with monkeypatch.context() as m:  # os.name only while no Path is made (pathlib reads it)
+        m.setattr(cli_update.os, "name", "posix")
+        m.setattr(sys, "platform", "darwin")
+        assert cli_update._ps_install() == {"ok": True}
+        assert hidden_run_kwargs() == {}
+    assert ran == [["sh", "-c", "curl -fsSL https://chatgpt.com/codex/install.sh | sh"]]
+    exe = tmp_path / ".codex" / "packages" / "standalone" / "releases" / "0.153.4-aarch64-apple-darwin" / "bin" / "codex"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"\xcf\xfa\xed\xfe")
+    monkeypatch.setattr("cli_update._codex_home", lambda: tmp_path / ".codex")
+    monkeypatch.setattr("cli_update._path_codex", lambda override="": "")
+    assert cli_update._install_cli() == {"ok": True}
+    assert resolve_bin() == str(exe.resolve())
+    assert not is_node_codex_wrapper(str(exe))
+
+
 def test_parse_and_heal():
     assert parse_version_tuple("codex-cli 0.42.0") == (0, 42, 0)
     assert is_cli_too_old_error(

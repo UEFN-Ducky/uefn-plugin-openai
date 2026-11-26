@@ -16,6 +16,7 @@ from typing import Any
 _BIN = "codex"
 _NPM_PKG = "@openai/codex"
 _INSTALL_PS = "irm https://chatgpt.com/codex/install.ps1 | iex"
+_INSTALL_SH = "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
 _DEFAULT_PANEL_PORT = 4200
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)")
 _REQUIRED_RE = re.compile(
@@ -270,14 +271,14 @@ def powershell_exe() -> str:
 
 
 def _ps_install() -> dict[str, Any]:
-    if os.name != "nt":
-        return {"ok": False, "error": "no PowerShell installer"}
-    ps = f"Set-ExecutionPolicy -Scope Process Bypass -Force; {_INSTALL_PS}"
+    """OpenAI's standalone installer: install.ps1 on Windows, install.sh on macOS/Linux."""
+    if os.name == "nt":
+        ps = f"Set-ExecutionPolicy -Scope Process Bypass -Force; {_INSTALL_PS}"
+        argv = [powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps]
+    else:
+        argv = ["sh", "-c", _INSTALL_SH]
     try:
-        proc = _run(
-            [powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-            timeout_s=300,
-        )
+        proc = _run(argv, timeout_s=300)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": str(exc)}
     if proc.returncode != 0:
@@ -286,7 +287,7 @@ def _ps_install() -> dict[str, Any]:
 
 
 def _install_cli() -> dict[str, Any]:
-    first = _ps_install() if os.name == "nt" else {"ok": False}
+    first = _ps_install()
     if first.get("ok") and resolve_bin():
         return first
     # npm's win32 vendor exe is what spawn EFAULT'd — don't reinstall it if
